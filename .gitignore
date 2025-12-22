@@ -1,0 +1,19 @@
+# Build outputs
+codebase/bin/
+codebase/obj/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Game DLLs (copyrighted - must not distribute)
+codebase/Libs/*.dll
+
+# Keep mod DLL for distribution
+!mod/*.dll
