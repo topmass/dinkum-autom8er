@@ -1,7 +1,7 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** 1.2.0
+**Version:** 1.3.0
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
@@ -46,9 +46,9 @@
 ```
 Autom8er namespace
 ├── Plugin : BaseUnityPlugin
-│   ├── Config: configConveyorTileItemId, configMaxMachinesPerCycle
+│   ├── Config: configConveyorTileItemId, configMaxMachinesPerCycle, configKeepOneItem
 │   ├── Constants: WHITE_CRATE_TILE_ID, WHITE_CHEST_TILE_ID, DEFAULT_CONVEYOR_TILE_ITEM_ID
-│   ├── Runtime: ConveyorTileType, ConveyorTileItemId, MaxMachinesPerCycle
+│   ├── Runtime: ConveyorTileType, ConveyorTileItemId, MaxMachinesPerCycle, KeepOneItem
 │   ├── Awake() - Init config, apply Harmony patches
 │   ├── Update() - Scan timer, process chests every 0.5s
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
@@ -250,6 +250,7 @@ item.itemChange.getChangerResultId(tileObjectId);
 ---
 
 ## Version History
+- **1.3.0** - Added KeepOneItem config to leave placeholder items in slots for easy stacking
 - **1.2.0** - Added MaxMachinesPerCycle config for parallel machine loading with type diversity
 - **1.1.0** - Added configurable conveyor tile, path examples in config
 - **1.0.0** - Initial release with auto I/O, white crate input-only, conveyor system

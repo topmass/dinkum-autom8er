@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.2.0")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.3.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -19,6 +19,7 @@ namespace Autom8er
         // Config
         private ConfigEntry<int> configConveyorTileItemId;
         private ConfigEntry<int> configMaxMachinesPerCycle;
+        private ConfigEntry<bool> configKeepOneItem;
 
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
@@ -31,6 +32,7 @@ namespace Autom8er
         public static int ConveyorTileType = -1;
         public static int ConveyorTileItemId = DEFAULT_CONVEYOR_TILE_ITEM_ID;
         public static int MaxMachinesPerCycle = 1;
+        public static bool KeepOneItem = false;
 
         private void Awake()
         {
@@ -55,15 +57,27 @@ namespace Autom8er
                 "Higher values = more parallel loading but slightly more CPU/network usage per cycle."
             );
 
+            configKeepOneItem = Config.Bind(
+                "Automation",
+                "KeepOneItem",
+                false,
+                "Keep one item in chest slots to maintain placeholders for easy stacking.\n" +
+                "When enabled, requires 1 extra item beyond what the machine needs before it will take from a slot.\n" +
+                "Example: Furnace needs 5 ore - will only take from stacks of 6+, leaving 1 behind.\n" +
+                "This helps items stack into existing slots when you return from gathering."
+            );
+
             ConveyorTileItemId = configConveyorTileItemId.Value;
             MaxMachinesPerCycle = Mathf.Clamp(configMaxMachinesPerCycle.Value, 1, 10);
+            KeepOneItem = configKeepOneItem.Value;
 
-            Log.LogInfo("Autom8er v1.2.0 loaded!");
+            Log.LogInfo("Autom8er v1.3.0 loaded!");
             Log.LogInfo("- All machines supported (any with ItemChanger)");
             Log.LogInfo("- All chests/crates supported (except special containers)");
             Log.LogInfo("- White crates/chests = INPUT ONLY");
             Log.LogInfo("- Conveyor tile Item ID: " + ConveyorTileItemId);
             Log.LogInfo("- Max machines per cycle: " + MaxMachinesPerCycle);
+            Log.LogInfo("- Keep one item: " + KeepOneItem);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -275,7 +289,8 @@ namespace Autom8er
                         continue;
 
                     int amountNeeded = item.itemChange.getAmountNeeded(tileObjectId);
-                    if (stack < amountNeeded)
+                    int minRequired = Plugin.KeepOneItem ? amountNeeded + 1 : amountNeeded;
+                    if (stack < minRequired)
                         continue;
 
                     if (inside != null)
@@ -417,7 +432,8 @@ namespace Autom8er
                             continue;
 
                         int amountNeeded = item.itemChange.getAmountNeeded(tileObjectId);
-                        if (stack < amountNeeded)
+                        int minRequired = Plugin.KeepOneItem ? amountNeeded + 1 : amountNeeded;
+                        if (stack < minRequired)
                             continue;
 
                         if (inside != null)

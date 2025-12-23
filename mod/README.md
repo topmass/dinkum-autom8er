@@ -1,4 +1,4 @@
-# Autom8er v1.2.0
+# Autom8er v1.3.0
 
 Automation and conveyor belts for Dinkum machines.
 
@@ -75,6 +75,13 @@ BepInEx/config/topmass.autom8er.cfg
 
 **Settings:**
 ```ini
+[Automation]
+## Keep one item in chest slots to maintain placeholders for easy stacking.
+## When enabled, requires 1 extra item beyond what the machine needs before it will take from a slot.
+## Example: Furnace needs 5 ore - will only take from stacks of 6+, leaving 1 behind.
+## This helps items stack into existing slots when you return from gathering.
+KeepOneItem = false
+
 [Conveyor]
 ## Item ID of the floor/path tile to use as conveyor belt.
 ## Examples: Black Marble Path (1747), Cobblestone Path (964), Rock Path (346), Iron Path (775), Brick Path (15)
@@ -96,6 +103,11 @@ MaxMachinesPerCycle = 1
 | 775 | Iron Path |
 | 964 | Cobblestone Path |
 | 1747 | Black Marble Path (default) |
+
+**KeepOneItem:**
+- Default `false` = Takes all items needed, may empty slots
+- Set to `true` = Always leaves 1 item behind in each slot
+- Useful for keeping placeholder items so returning loot auto-stacks into existing slots
 
 **MaxMachinesPerCycle:**
 - Default `1` = Original behavior, one machine loads at a time (good for most setups)
