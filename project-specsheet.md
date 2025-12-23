@@ -1,7 +1,7 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** 1.1.0
+**Version:** 1.2.0
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
@@ -46,13 +46,13 @@
 ```
 Autom8er namespace
 ├── Plugin : BaseUnityPlugin
-│   ├── Config: configConveyorTileItemId
+│   ├── Config: configConveyorTileItemId, configMaxMachinesPerCycle
 │   ├── Constants: WHITE_CRATE_TILE_ID, WHITE_CHEST_TILE_ID, DEFAULT_CONVEYOR_TILE_ITEM_ID
-│   ├── Runtime: ConveyorTileType, ConveyorTileItemId
+│   ├── Runtime: ConveyorTileType, ConveyorTileItemId, MaxMachinesPerCycle
 │   ├── Awake() - Init config, apply Harmony patches
 │   ├── Update() - Scan timer, process chests every 0.5s
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
-│   └── ProcessAllChests() - Main loop scanning all active chests
+│   └── ProcessAllChests() - Main loop with multi-machine support per cycle
 │
 ├── EjectItemOnCyclePatch [HarmonyPatch]
 │   └── Prefix on ItemDepositAndChanger.ejectItemOnCycle()
@@ -83,12 +83,16 @@ Autom8er namespace
 1. `Update()` runs every 0.5 seconds on server
 2. Iterates all `ContainerManager.manage.activeChests`
 3. For each chest with items:
-   - `TryFeedAdjacentMachine()` - Check 4 adjacent tiles for machines
-   - `TryFeedMachineViaConveyorPath()` - BFS from chest along conveyor tiles to find machines
+   - Tracks `machinesFed` count and `fedMachineTypes` HashSet for diversity
+   - Loops until `machinesFed >= MaxMachinesPerCycle` or no more machines to feed
+   - `TryFeedAdjacentMachine(chest, inside, fedMachineTypes)` - Check 4 adjacent tiles
+   - `TryFeedMachineViaConveyorPath(chest, inside, fedMachineTypes)` - BFS along conveyor
+   - Skips machine types already in `fedMachineTypes` (ensures type diversity)
 4. Validates: machine empty, item can be deposited, enough quantity
 5. Calls `NetworkMapSharer.Instance.RpcDepositItemIntoChanger()` to deposit
 6. Calls `NetworkMapSharer.Instance.startTileTimerOnServer()` to start processing
 7. Updates chest slot via `ContainerManager.manage.changeSlotInChest()`
+8. Adds fed machine's tileObjectId to `fedMachineTypes`
 
 ### Auto Output (Machine → Chest)
 1. Harmony Prefix on `ItemDepositAndChanger.ejectItemOnCycle()`
@@ -246,5 +250,6 @@ item.itemChange.getChangerResultId(tileObjectId);
 ---
 
 ## Version History
+- **1.2.0** - Added MaxMachinesPerCycle config for parallel machine loading with type diversity
 - **1.1.0** - Added configurable conveyor tile, path examples in config
 - **1.0.0** - Initial release with auto I/O, white crate input-only, conveyor system

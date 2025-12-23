@@ -1,4 +1,4 @@
-# Autom8er v1.1.0
+# Autom8er v1.2.0
 
 Automation and conveyor belts for Dinkum machines.
 
@@ -79,6 +79,13 @@ BepInEx/config/topmass.autom8er.cfg
 ## Item ID of the floor/path tile to use as conveyor belt.
 ## Examples: Black Marble Path (1747), Cobblestone Path (964), Rock Path (346), Iron Path (775), Brick Path (15)
 ConveyorTileItemId = 1747
+
+[Performance]
+## Maximum number of machines to load per cycle (every 0.5 seconds).
+## Default: 1 (original behavior, machines load one at a time - good for most setups)
+## Increase to 2-5 if you have large arrays with multiple machine types and want them to load simultaneously.
+## Higher values = more parallel loading but slightly more CPU/network usage per cycle.
+MaxMachinesPerCycle = 1
 ```
 
 **Common path Item IDs:**
@@ -89,6 +96,11 @@ ConveyorTileItemId = 1747
 | 775 | Iron Path |
 | 964 | Cobblestone Path |
 | 1747 | Black Marble Path (default) |
+
+**MaxMachinesPerCycle:**
+- Default `1` = Original behavior, one machine loads at a time (good for most setups)
+- Set to `2-5` for large arrays with multiple machine types (furnaces + BBQs + grinders)
+- When set higher, prioritizes type diversity (feeds one furnace, one BBQ, one grinder per cycle instead of three furnaces)
 
 ## Requirements
 
