@@ -8,18 +8,17 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.3.0")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.2.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
         private Harmony harmony;
         private float scanTimer = 0f;
-        private const float SCAN_INTERVAL = 0.5f;
 
         // Config
         private ConfigEntry<int> configConveyorTileItemId;
-        private ConfigEntry<int> configMaxMachinesPerCycle;
         private ConfigEntry<bool> configKeepOneItem;
+        private ConfigEntry<float> configScanInterval;
 
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
@@ -31,8 +30,8 @@ namespace Autom8er
         // Cached at runtime from item data
         public static int ConveyorTileType = -1;
         public static int ConveyorTileItemId = DEFAULT_CONVEYOR_TILE_ITEM_ID;
-        public static int MaxMachinesPerCycle = 1;
         public static bool KeepOneItem = false;
+        public static float ScanInterval = 0.3f;
 
         private void Awake()
         {
@@ -47,14 +46,14 @@ namespace Autom8er
                 "Examples: Black Marble Path (1747), Cobblestone Path (964), Rock Path (346), Iron Path (775), Brick Path (15)"
             );
 
-            configMaxMachinesPerCycle = Config.Bind(
+            configScanInterval = Config.Bind(
                 "Performance",
-                "MaxMachinesPerCycle",
-                1,
-                "Maximum number of machines to load per cycle (every 0.5 seconds).\n" +
-                "Default: 1 (original behavior, machines load one at a time - good for most setups)\n" +
-                "Increase to 2-5 if you have large arrays with multiple machine types and want them to load simultaneously.\n" +
-                "Higher values = more parallel loading but slightly more CPU/network usage per cycle."
+                "ScanInterval",
+                0.3f,
+                "How often to scan chests and feed machines (in seconds).\n" +
+                "Default: 0.3 (about 3 times per second)\n" +
+                "Lower = faster automation but more CPU usage. Range: 0.1 to 1.0\n" +
+                "Recommended: 0.2-0.3 for fast setups, 0.5 for relaxed."
             );
 
             configKeepOneItem = Config.Bind(
@@ -68,15 +67,15 @@ namespace Autom8er
             );
 
             ConveyorTileItemId = configConveyorTileItemId.Value;
-            MaxMachinesPerCycle = Mathf.Clamp(configMaxMachinesPerCycle.Value, 1, 10);
             KeepOneItem = configKeepOneItem.Value;
+            ScanInterval = Mathf.Clamp(configScanInterval.Value, 0.1f, 1.0f);
 
-            Log.LogInfo("Autom8er v1.3.0 loaded!");
+            Log.LogInfo("Autom8er v1.2.0 loaded!");
             Log.LogInfo("- All machines supported (any with ItemChanger)");
             Log.LogInfo("- All chests/crates supported (except special containers)");
             Log.LogInfo("- White crates/chests = INPUT ONLY");
             Log.LogInfo("- Conveyor tile Item ID: " + ConveyorTileItemId);
-            Log.LogInfo("- Max machines per cycle: " + MaxMachinesPerCycle);
+            Log.LogInfo("- Scan interval: " + ScanInterval + "s");
             Log.LogInfo("- Keep one item: " + KeepOneItem);
 
             harmony = new Harmony("topmass.autom8er");
@@ -100,7 +99,7 @@ namespace Autom8er
             }
 
             scanTimer += Time.deltaTime;
-            if (scanTimer >= SCAN_INTERVAL)
+            if (scanTimer >= ScanInterval)
             {
                 scanTimer = 0f;
                 ProcessAllChests();
@@ -148,32 +147,11 @@ namespace Autom8er
                     inside = HouseManager.manage.getHouseInfoIfExists(chest.insideX, chest.insideY);
                 }
 
-                // Track machines fed this cycle for multi-machine support
-                int machinesFed = 0;
-                HashSet<int> fedMachineTypes = new HashSet<int>();
+                // Try to feed one machine per chest per cycle
+                if (ConveyorHelper.TryFeedAdjacentMachine(chest, inside))
+                    continue;
 
-                // Keep feeding until we hit the limit or can't feed anymore
-                while (machinesFed < MaxMachinesPerCycle)
-                {
-                    // First try adjacent machines
-                    int fedAdjacent = ConveyorHelper.TryFeedAdjacentMachine(chest, inside, fedMachineTypes);
-                    if (fedAdjacent > 0)
-                    {
-                        machinesFed += fedAdjacent;
-                        continue;
-                    }
-
-                    // Then try via conveyor path
-                    int fedViaConveyor = ConveyorHelper.TryFeedMachineViaConveyorPath(chest, inside, fedMachineTypes);
-                    if (fedViaConveyor > 0)
-                    {
-                        machinesFed += fedViaConveyor;
-                        continue;
-                    }
-
-                    // No more machines to feed from this chest
-                    break;
-                }
+                ConveyorHelper.TryFeedMachineViaConveyorPath(chest, inside);
             }
         }
 
@@ -248,7 +226,7 @@ namespace Autom8er
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
 
-        public static int TryFeedAdjacentMachine(Chest sourceChest, HouseDetails inside, HashSet<int> fedMachineTypes)
+        public static bool TryFeedAdjacentMachine(Chest sourceChest, HouseDetails inside)
         {
             for (int slot = 0; slot < sourceChest.itemIds.Length; slot++)
             {
@@ -272,10 +250,6 @@ namespace Autom8er
 
                     int tileObjectId = GetTileObjectId(machineX, machineY, inside);
                     if (tileObjectId < 0)
-                        continue;
-
-                    // Skip if we've already fed this machine type this cycle (for diversity)
-                    if (fedMachineTypes.Contains(tileObjectId))
                         continue;
 
                     TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
@@ -313,21 +287,18 @@ namespace Autom8er
                         ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, itemId, remaining, inside);
                     }
 
-                    // Track that we've fed this machine type
-                    fedMachineTypes.Add(tileObjectId);
-
                     Plugin.Log.LogInfo("Autom8er: Chest -> Machine: " + amountNeeded + "x " + item.itemName);
-                    return 1;
+                    return true;
                 }
             }
 
-            return 0;
+            return false;
         }
 
-        public static int TryFeedMachineViaConveyorPath(Chest sourceChest, HouseDetails inside, HashSet<int> fedMachineTypes)
+        public static bool TryFeedMachineViaConveyorPath(Chest sourceChest, HouseDetails inside)
         {
             if (Plugin.ConveyorTileType == -1)
-                return 0;
+                return false;
 
             // Find conveyor tiles adjacent to this chest
             HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
@@ -353,7 +324,7 @@ namespace Autom8er
             }
 
             if (pathNetwork.Count == 0)
-                return 0;
+                return false;
 
             // BFS to find all connected path tiles
             int maxPathTiles = 500;
@@ -404,10 +375,6 @@ namespace Autom8er
                     if (tileObjectId < 0)
                         continue;
 
-                    // Skip if we've already fed this machine type this cycle (for diversity)
-                    if (fedMachineTypes.Contains(tileObjectId))
-                        continue;
-
                     TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
                     if (tileObj == null || tileObj.tileObjectItemChanger == null)
                         continue;
@@ -456,16 +423,13 @@ namespace Autom8er
                             ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, itemId, remaining, inside);
                         }
 
-                        // Track that we've fed this machine type
-                        fedMachineTypes.Add(tileObjectId);
-
                         Plugin.Log.LogInfo("Autom8er: Conveyor input -> Machine: " + amountNeeded + "x " + item.itemName);
-                        return 1;
+                        return true;
                     }
                 }
             }
 
-            return 0;
+            return false;
         }
 
         public static bool TryDepositToAdjacentChest(int machineX, int machineY, HouseDetails inside, int itemId, int stackAmount)

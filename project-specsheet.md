@@ -1,7 +1,7 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** 1.3.0
+**Version:** 1.2.0
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
@@ -46,13 +46,13 @@
 ```
 Autom8er namespace
 ├── Plugin : BaseUnityPlugin
-│   ├── Config: configConveyorTileItemId, configMaxMachinesPerCycle, configKeepOneItem
+│   ├── Config: configConveyorTileItemId, configKeepOneItem, configScanInterval
 │   ├── Constants: WHITE_CRATE_TILE_ID, WHITE_CHEST_TILE_ID, DEFAULT_CONVEYOR_TILE_ITEM_ID
-│   ├── Runtime: ConveyorTileType, ConveyorTileItemId, MaxMachinesPerCycle, KeepOneItem
+│   ├── Runtime: ConveyorTileType, ConveyorTileItemId, KeepOneItem, ScanInterval
 │   ├── Awake() - Init config, apply Harmony patches
-│   ├── Update() - Scan timer, process chests every 0.5s
+│   ├── Update() - Scan timer, process chests at ScanInterval (default 0.3s)
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
-│   └── ProcessAllChests() - Main loop with multi-machine support per cycle
+│   └── ProcessAllChests() - Main loop, one machine per chest per cycle
 │
 ├── EjectItemOnCyclePatch [HarmonyPatch]
 │   └── Prefix on ItemDepositAndChanger.ejectItemOnCycle()
@@ -61,8 +61,8 @@ Autom8er namespace
 │       - Priority 2: Via conveyor path network
 │
 └── ConveyorHelper (static class)
-    ├── TryFeedAdjacentMachine() - Direct chest → machine
-    ├── TryFeedMachineViaConveyorPath() - Chest → path → machine
+    ├── TryFeedAdjacentMachine() - Direct chest → machine (returns bool)
+    ├── TryFeedMachineViaConveyorPath() - Chest → path → machine (returns bool)
     ├── TryDepositToAdjacentChest() - Machine → direct chest
     ├── TryDepositViaConveyorPath() - Machine → path → chest
     ├── IsConveyorTile() - Check if tile is conveyor path
@@ -80,19 +80,17 @@ Autom8er namespace
 ## How Systems Work
 
 ### Auto Input (Chest → Machine)
-1. `Update()` runs every 0.5 seconds on server
+1. `Update()` runs at `ScanInterval` (default 0.3s) on server
 2. Iterates all `ContainerManager.manage.activeChests`
 3. For each chest with items:
-   - Tracks `machinesFed` count and `fedMachineTypes` HashSet for diversity
-   - Loops until `machinesFed >= MaxMachinesPerCycle` or no more machines to feed
-   - `TryFeedAdjacentMachine(chest, inside, fedMachineTypes)` - Check 4 adjacent tiles
-   - `TryFeedMachineViaConveyorPath(chest, inside, fedMachineTypes)` - BFS along conveyor
-   - Skips machine types already in `fedMachineTypes` (ensures type diversity)
+   - `TryFeedAdjacentMachine(chest, inside)` - Check 4 adjacent tiles first
+   - If no adjacent machine, `TryFeedMachineViaConveyorPath(chest, inside)` - BFS along conveyor
+   - One machine fed per chest per cycle (speed controlled by ScanInterval)
 4. Validates: machine empty, item can be deposited, enough quantity
-5. Calls `NetworkMapSharer.Instance.RpcDepositItemIntoChanger()` to deposit
-6. Calls `NetworkMapSharer.Instance.startTileTimerOnServer()` to start processing
-7. Updates chest slot via `ContainerManager.manage.changeSlotInChest()`
-8. Adds fed machine's tileObjectId to `fedMachineTypes`
+5. If `KeepOneItem` enabled, requires `amountNeeded + 1` items before taking
+6. Calls `NetworkMapSharer.Instance.RpcDepositItemIntoChanger()` to deposit
+7. Calls `NetworkMapSharer.Instance.startTileTimerOnServer()` to start processing
+8. Updates chest slot via `ContainerManager.manage.changeSlotInChest()`
 
 ### Auto Output (Machine → Chest)
 1. Harmony Prefix on `ItemDepositAndChanger.ejectItemOnCycle()`
@@ -250,7 +248,6 @@ item.itemChange.getChangerResultId(tileObjectId);
 ---
 
 ## Version History
-- **1.3.0** - Added KeepOneItem config to leave placeholder items in slots for easy stacking
-- **1.2.0** - Added MaxMachinesPerCycle config for parallel machine loading with type diversity
+- **1.2.0** - Added ScanInterval config (default 0.3s), KeepOneItem config for placeholder preservation
 - **1.1.0** - Added configurable conveyor tile, path examples in config
 - **1.0.0** - Initial release with auto I/O, white crate input-only, conveyor system

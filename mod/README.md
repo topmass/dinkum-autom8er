@@ -1,4 +1,4 @@
-# Autom8er v1.3.0
+# Autom8er v1.2.0
 
 Automation and conveyor belts for Dinkum machines.
 
@@ -79,7 +79,6 @@ BepInEx/config/topmass.autom8er.cfg
 ## Keep one item in chest slots to maintain placeholders for easy stacking.
 ## When enabled, requires 1 extra item beyond what the machine needs before it will take from a slot.
 ## Example: Furnace needs 5 ore - will only take from stacks of 6+, leaving 1 behind.
-## This helps items stack into existing slots when you return from gathering.
 KeepOneItem = false
 
 [Conveyor]
@@ -88,11 +87,10 @@ KeepOneItem = false
 ConveyorTileItemId = 1747
 
 [Performance]
-## Maximum number of machines to load per cycle (every 0.5 seconds).
-## Default: 1 (original behavior, machines load one at a time - good for most setups)
-## Increase to 2-5 if you have large arrays with multiple machine types and want them to load simultaneously.
-## Higher values = more parallel loading but slightly more CPU/network usage per cycle.
-MaxMachinesPerCycle = 1
+## How often to scan chests and feed machines (in seconds).
+## Default: 0.3 (about 3 times per second)
+## Lower = faster automation but more CPU usage. Range: 0.1 to 1.0
+ScanInterval = 0.3
 ```
 
 **Common path Item IDs:**
@@ -109,10 +107,10 @@ MaxMachinesPerCycle = 1
 - Set to `true` = Always leaves 1 item behind in each slot
 - Useful for keeping placeholder items so returning loot auto-stacks into existing slots
 
-**MaxMachinesPerCycle:**
-- Default `1` = Original behavior, one machine loads at a time (good for most setups)
-- Set to `2-5` for large arrays with multiple machine types (furnaces + BBQs + grinders)
-- When set higher, prioritizes type diversity (feeds one furnace, one BBQ, one grinder per cycle instead of three furnaces)
+**ScanInterval:**
+- Default `0.3` = Scans about 3 times per second (fast and responsive)
+- Set to `0.2` for faster automation
+- Set to `0.5` for more relaxed/lower CPU usage
 
 ## Requirements
 
