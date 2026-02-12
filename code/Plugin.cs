@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.3.0")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.3.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -82,7 +82,7 @@ namespace Autom8er
             ScanInterval = Mathf.Clamp(configScanInterval.Value, 0.1f, 1.0f);
             SiloFillSpeed = Mathf.Clamp(configSiloFillSpeed.Value, 1, 5);
 
-            Log.LogInfo("Autom8er v1.3.0 loaded!");
+            Log.LogInfo("Autom8er v1.3.1 loaded!");
             Log.LogInfo("- Silos: auto-fill from chests (configurable speed)");
             Log.LogInfo("- Crab pots: auto-bait loading + harvest via conveyors");
             Log.LogInfo("- Bee houses, key cutters, worm farms (harvest on day change)");
@@ -709,6 +709,10 @@ namespace Autom8er
                 return;
 
             TileObjectGrowthStages growth = tileObj.tileObjectGrowthStages;
+
+            // NEVER auto-harvest incubators or anything that spawns farm animals
+            if (growth.spawnsFarmAnimal)
+                return;
 
             // Debug logging for crab pots
             if (growth.isCrabPot)
