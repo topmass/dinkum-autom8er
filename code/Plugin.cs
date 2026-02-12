@@ -172,6 +172,9 @@ namespace Autom8er
                 // Try to load bait into nearby crab pots (2-tile radius due to water)
                 CrabPotHelper.TryLoadBaitIntoCrabPots(chest, inside);
 
+                // Try to load items into growth stage objects (incubators, etc)
+                GrowthStageHelper.TryLoadItemsIntoGrowthStages(chest, inside);
+
                 // Try to load feed into nearby silos (visual fill, one item per tick)
                 SiloHelper.TryLoadFeedIntoSilos(chest, inside);
             }
@@ -635,11 +638,9 @@ namespace Autom8er
             // BFS along conveyor tiles, checking tiles within 2-tile radius for harvestables
             // (2-tile radius needed for crab pots in water)
             int maxSteps = 100;
-            int conveyorTilesProcessed = 0;
             while (queue.Count > 0 && maxSteps-- > 0)
             {
                 var (cx, cy) = queue.Dequeue();
-                conveyorTilesProcessed++;
 
                 // Check 2-tile radius around each conveyor tile for harvestable machines
                 for (int offsetX = -2; offsetX <= 2; offsetX++)
@@ -688,11 +689,6 @@ namespace Autom8er
                     }
                 }
             }
-
-            if (conveyorTilesProcessed > 0)
-            {
-                Plugin.Log.LogInfo("Autom8er DEBUG: Scanned " + conveyorTilesProcessed + " conveyor tiles for harvestables from chest at (" + startX + "," + startY + ")");
-            }
         }
 
         public static void TryAutoHarvestAt(int xPos, int yPos, HouseDetails inside)
@@ -714,12 +710,6 @@ namespace Autom8er
             if (growth.spawnsFarmAnimal)
                 return;
 
-            // Debug logging for crab pots
-            if (growth.isCrabPot)
-            {
-                Plugin.Log.LogInfo("Autom8er DEBUG: Found crab pot at (" + xPos + "," + yPos + "), heightMap=" + WorldManager.Instance.heightMap[xPos, yPos]);
-            }
-
             // Check if harvestable (not manually harvestable check - we want auto-harvest)
             int currentStatus = inside != null
                 ? inside.houseMapOnTileStatus[xPos, yPos]
@@ -736,19 +726,7 @@ namespace Autom8er
             // This prevents items from being lost when no chest is nearby
             Chest outputChest = FindAdjacentChestForHarvest(xPos, yPos, inside, searchRadius);
             if (outputChest == null)
-            {
-                // No chest found - don't harvest, leave items for manual collection
-                if (growth.isCrabPot)
-                {
-                    Plugin.Log.LogInfo("Autom8er DEBUG: Crab pot at (" + xPos + "," + yPos + ") is harvestable but no output chest found!");
-                }
                 return;
-            }
-
-            if (growth.isCrabPot)
-            {
-                Plugin.Log.LogInfo("Autom8er DEBUG: Crab pot at (" + xPos + "," + yPos + ") found output chest at (" + outputChest.xPos + "," + outputChest.yPos + ")");
-            }
 
             // Set the inside context for the HarvestPatch to use
             CurrentHarvestInside = inside;
@@ -1556,6 +1534,205 @@ namespace Autom8er
                 }
 
                 Plugin.Log.LogInfo("Autom8er: Loaded bait into crab pot at " + crabPotX + "," + crabPotY + ": " + item.itemName);
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    // Handles loading items into TileObjectGrowthStages objects (incubators, etc)
+    // Excludes crab pots (handled by CrabPotHelper with 2-tile radius)
+    public static class GrowthStageHelper
+    {
+        private static readonly int[] dx = { -1, 0, 1, 0 };
+        private static readonly int[] dy = { 0, -1, 0, 1 };
+
+        public static void TryLoadItemsIntoGrowthStages(Chest sourceChest, HouseDetails inside)
+        {
+            HashSet<long> checkedPositions = new HashSet<long>();
+
+            // Check 1-tile radius around chest
+            if (TryLoadInRadius(sourceChest, sourceChest.xPos, sourceChest.yPos, inside, checkedPositions))
+                return;
+
+            // Also check via conveyor path
+            TryLoadViaConveyorPath(sourceChest, inside, checkedPositions);
+        }
+
+        private static bool TryLoadInRadius(Chest sourceChest, int centerX, int centerY, HouseDetails inside, HashSet<long> checkedPositions)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                int checkX = centerX + dx[i];
+                int checkY = centerY + dy[i];
+
+                if (checkX < 0 || checkY < 0)
+                    continue;
+
+                long key = ((long)checkX << 32) | (uint)checkY;
+                if (checkedPositions.Contains(key))
+                    continue;
+                checkedPositions.Add(key);
+
+                if (checkX >= WorldManager.Instance.onTileMap.GetLength(0) ||
+                    checkY >= WorldManager.Instance.onTileMap.GetLength(1))
+                    continue;
+
+                if (TryLoadAtPosition(sourceChest, checkX, checkY, inside))
+                    return true;
+            }
+            return false;
+        }
+
+        private static void TryLoadViaConveyorPath(Chest sourceChest, HouseDetails inside, HashSet<long> checkedPositions)
+        {
+            if (Plugin.ConveyorTileType < 0)
+                return;
+
+            HashSet<long> visitedConveyors = new HashSet<long>();
+            Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
+
+            for (int i = 0; i < 4; i++)
+            {
+                int nx = sourceChest.xPos + dx[i];
+                int ny = sourceChest.yPos + dy[i];
+
+                if (nx < 0 || ny < 0)
+                    continue;
+
+                if (ConveyorHelper.IsConveyorTile(nx, ny, inside))
+                {
+                    long key = ((long)nx << 32) | (uint)ny;
+                    if (!visitedConveyors.Contains(key))
+                    {
+                        visitedConveyors.Add(key);
+                        queue.Enqueue((nx, ny));
+                    }
+                }
+            }
+
+            int maxSteps = 100;
+            while (queue.Count > 0 && maxSteps-- > 0)
+            {
+                var (cx, cy) = queue.Dequeue();
+
+                if (TryLoadInRadius(sourceChest, cx, cy, inside, checkedPositions))
+                    return;
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = cx + dx[i];
+                    int ny = cy + dy[i];
+
+                    if (nx < 0 || ny < 0)
+                        continue;
+
+                    long key = ((long)nx << 32) | (uint)ny;
+                    if (visitedConveyors.Contains(key))
+                        continue;
+
+                    if (ConveyorHelper.IsConveyorTile(nx, ny, inside))
+                    {
+                        visitedConveyors.Add(key);
+                        queue.Enqueue((nx, ny));
+                    }
+                }
+            }
+        }
+
+        private static bool TryLoadAtPosition(Chest sourceChest, int checkX, int checkY, HouseDetails inside)
+        {
+            int tileObjectId = inside != null
+                ? inside.houseMapOnTile[checkX, checkY]
+                : WorldManager.Instance.onTileMap[checkX, checkY];
+
+            if (tileObjectId < 0)
+                return false;
+
+            TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
+            if (tileObj == null || tileObj.tileObjectGrowthStages == null)
+                return false;
+
+            TileObjectGrowthStages growth = tileObj.tileObjectGrowthStages;
+
+            // Skip crab pots (handled by CrabPotHelper with 2-tile radius)
+            if (growth.isCrabPot)
+                return false;
+
+            // Must have items it accepts
+            if (growth.itemsToPlace == null || growth.itemsToPlace.Length == 0)
+                return false;
+
+            // Check if it needs loading (not yet at max stage for placing)
+            int currentStatus = inside != null
+                ? inside.houseMapOnTileStatus[checkX, checkY]
+                : WorldManager.Instance.onTileStatusMap[checkX, checkY];
+
+            if (currentStatus >= growth.maxStageToReachByPlacing)
+                return false; // Already loaded
+
+            return TryLoadFromChest(sourceChest, checkX, checkY, inside, growth);
+        }
+
+        private static bool TryLoadFromChest(Chest chest, int targetX, int targetY, HouseDetails inside, TileObjectGrowthStages growth)
+        {
+            for (int slot = 0; slot < chest.itemIds.Length; slot++)
+            {
+                int itemId = chest.itemIds[slot];
+                int stack = chest.itemStacks[slot];
+
+                if (itemId < 0 || stack <= 0)
+                    continue;
+
+                // Check if this item is valid for the growth stage
+                InventoryItem item = Inventory.Instance.allItems[itemId];
+                bool isValid = false;
+
+                for (int i = 0; i < growth.itemsToPlace.Length; i++)
+                {
+                    if (growth.itemsToPlace[i] == item)
+                    {
+                        isValid = true;
+                        break;
+                    }
+                }
+
+                if (!isValid)
+                    continue;
+
+                // Check KeepOneItem setting
+                int minRequired = Plugin.KeepOneItem ? 2 : 1;
+                if (stack < minRequired)
+                    continue;
+
+                // Load item into growth stage object
+                int newStatus = (inside != null
+                    ? inside.houseMapOnTileStatus[targetX, targetY]
+                    : WorldManager.Instance.onTileStatusMap[targetX, targetY]) + 1;
+
+                if (inside != null)
+                {
+                    inside.houseMapOnTileStatus[targetX, targetY] = newStatus;
+                }
+                else
+                {
+                    WorldManager.Instance.onTileStatusMap[targetX, targetY] = newStatus;
+                }
+                NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, targetX, targetY);
+
+                // Remove item from chest
+                int remaining = stack - 1;
+                if (remaining <= 0)
+                {
+                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, -1, 0, null);
+                }
+                else
+                {
+                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, itemId, remaining, null);
+                }
+
+                Plugin.Log.LogInfo("Autom8er: Loaded " + item.itemName + " into growth stage object at " + targetX + "," + targetY);
                 return true;
             }
 
