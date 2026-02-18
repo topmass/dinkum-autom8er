@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.3.1")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.4.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -20,6 +20,8 @@ namespace Autom8er
         private ConfigEntry<bool> configKeepOneItem;
         private ConfigEntry<float> configScanInterval;
         private ConfigEntry<int> configSiloFillSpeed;
+        private ConfigEntry<bool> configAutoFeedPonds;
+        private ConfigEntry<bool> configHoldOutputForBreeding;
 
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
@@ -34,6 +36,8 @@ namespace Autom8er
         public static bool KeepOneItem = false;
         public static float ScanInterval = 0.3f;
         public static int SiloFillSpeed = 2;
+        public static bool AutoFeedPonds = true;
+        public static bool HoldOutputForBreeding = true;
 
         private void Awake()
         {
@@ -77,19 +81,41 @@ namespace Autom8er
                 "Range: 1-5. Higher = faster filling but less visual effect."
             );
 
+            configAutoFeedPonds = Config.Bind(
+                "Fish Pond & Terrarium",
+                "AutoFeedPondsAndTerrariums",
+                true,
+                "Automatically feed fish ponds with critters and bug terrariums with honey\n" +
+                "from adjacent chests or via conveyor paths. Also extracts roe and cocoons\n" +
+                "into adjacent chests on day change."
+            );
+
+            configHoldOutputForBreeding = Config.Bind(
+                "Fish Pond & Terrarium",
+                "HoldOutputForBreeding",
+                true,
+                "When enabled, holds 15 roe in fish ponds and 10 cocoons in terrariums\n" +
+                "to allow breeding until they reach 5 creatures. Once full (5 fish/bugs),\n" +
+                "all output is extracted immediately since breeding cannot occur.\n" +
+                "Disable to always extract all output regardless of creature count."
+            );
+
             ConveyorTileItemId = configConveyorTileItemId.Value;
             KeepOneItem = configKeepOneItem.Value;
             ScanInterval = Mathf.Clamp(configScanInterval.Value, 0.1f, 1.0f);
             SiloFillSpeed = Mathf.Clamp(configSiloFillSpeed.Value, 1, 5);
+            AutoFeedPonds = configAutoFeedPonds.Value;
+            HoldOutputForBreeding = configHoldOutputForBreeding.Value;
 
-            Log.LogInfo("Autom8er v1.3.1 loaded!");
+            Log.LogInfo("Autom8er v1.4.0 loaded!");
             Log.LogInfo("- Silos: auto-fill from chests (configurable speed)");
             Log.LogInfo("- Crab pots: auto-bait loading + harvest via conveyors");
             Log.LogInfo("- Bee houses, key cutters, worm farms (harvest on day change)");
             Log.LogInfo("- All ItemChanger machines supported (furnaces, etc)");
             Log.LogInfo("- Charging stations (skips full durability)");
             Log.LogInfo("- White crates/chests = INPUT ONLY");
-            Log.LogInfo("Config: ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed);
+            Log.LogInfo("- Fish ponds & terrariums: auto-feed + harvest on day change");
+            Log.LogInfo("Config: ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -161,6 +187,11 @@ namespace Autom8er
                 {
                     inside = HouseManager.manage.getHouseInfoIfExists(chest.insideX, chest.insideY);
                 }
+
+                // Try to feed fish ponds and bug terrariums (before machine checks,
+                // since critters have itemChange and would get caught by TryFeedAdjacentMachine)
+                if (AutoFeedPonds)
+                    FishPondHelper.TryFeedPondsAndTerrariums(chest, inside);
 
                 // Try to feed one machine per chest per cycle
                 if (ConveyorHelper.TryFeedAdjacentMachine(chest, inside))
@@ -367,6 +398,7 @@ namespace Autom8er
 
             Plugin.Log.LogInfo("Autom8er: Processing day-change harvests...");
             HarvestHelper.ProcessHarvestableMachines();
+            FishPondHelper.ProcessPondAndTerrariumOutput();
             Plugin.Log.LogInfo("Autom8er: Day-change harvest processing complete");
         }
     }
@@ -535,6 +567,13 @@ namespace Autom8er
                 ContainerManager.manage.changeSlotInChest(
                     chest.xPos, chest.yPos, slotIndex,
                     itemId, amount, inside);
+            }
+
+            // Trigger AutoSorter to fire items to nearby chests
+            if (ConveyorHelper.IsAutoSorter(chest))
+            {
+                ContainerManager.manage.StartCoroutine(
+                    ContainerManager.manage.AutoSortItemsIntoNearbyChests(chest));
             }
 
             return true;
@@ -831,7 +870,9 @@ namespace Autom8er
                     else
                     {
                         // Regular items: need amountNeeded (plus 1 extra if KeepOneItem enabled)
-                        int minRequired = Plugin.KeepOneItem ? amountNeeded + 1 : amountNeeded;
+                        // AutoSorters are exempt from KeepOneItem
+                        bool keepOne = Plugin.KeepOneItem && !IsAutoSorter(sourceChest);
+                        int minRequired = keepOne ? amountNeeded + 1 : amountNeeded;
                         if (stack < minRequired)
                             continue;
                     }
@@ -995,7 +1036,9 @@ namespace Autom8er
                         else
                         {
                             // Regular items: need amountNeeded (plus 1 extra if KeepOneItem enabled)
-                            int minRequired = Plugin.KeepOneItem ? amountNeeded + 1 : amountNeeded;
+                            // AutoSorters are exempt from KeepOneItem
+                            bool keepOne = Plugin.KeepOneItem && !IsAutoSorter(sourceChest);
+                            int minRequired = keepOne ? amountNeeded + 1 : amountNeeded;
                             if (stack < minRequired)
                                 continue;
                         }
@@ -1305,7 +1348,7 @@ namespace Autom8er
                 return true;
 
             if (chestPlaceable.isFishPond || chestPlaceable.isBugTerrarium ||
-                chestPlaceable.isAutoSorter || chestPlaceable.isAutoPlacer ||
+                chestPlaceable.isAutoPlacer ||
                 chestPlaceable.isMannequin || chestPlaceable.isToolRack ||
                 chestPlaceable.isDisplayStand)
             {
@@ -1313,6 +1356,11 @@ namespace Autom8er
             }
 
             return false;
+        }
+
+        public static bool IsAutoSorter(Chest chest)
+        {
+            return chest != null && chest.IsAutoSorter();
         }
 
         public static int FindSlotForItem(Chest chest, int itemId)
@@ -1512,8 +1560,9 @@ namespace Autom8er
                 if (!isValidBait)
                     continue;
 
-                // Check KeepOneItem setting
-                int minRequired = Plugin.KeepOneItem ? 2 : 1;
+                // Check KeepOneItem setting (AutoSorters exempt)
+                bool keepOne = Plugin.KeepOneItem && !ConveyorHelper.IsAutoSorter(chest);
+                int minRequired = keepOne ? 2 : 1;
                 if (stack < minRequired)
                     continue;
 
@@ -1701,8 +1750,9 @@ namespace Autom8er
                 if (!isValid)
                     continue;
 
-                // Check KeepOneItem setting
-                int minRequired = Plugin.KeepOneItem ? 2 : 1;
+                // Check KeepOneItem setting (AutoSorters exempt)
+                bool keepOne = Plugin.KeepOneItem && !ConveyorHelper.IsAutoSorter(chest);
+                int minRequired = keepOne ? 2 : 1;
                 if (stack < minRequired)
                     continue;
 
@@ -1908,8 +1958,9 @@ namespace Autom8er
                 if (itemId != validItemId || stack <= 0)
                     continue;
 
-                // Check KeepOneItem setting - reserve 1 if enabled
-                int reserve = Plugin.KeepOneItem ? 1 : 0;
+                // Check KeepOneItem setting - reserve 1 if enabled (AutoSorters exempt)
+                bool keepOne = Plugin.KeepOneItem && !ConveyorHelper.IsAutoSorter(chest);
+                int reserve = keepOne ? 1 : 0;
                 int available = stack - reserve;
                 if (available <= 0)
                     continue;
@@ -1939,6 +1990,434 @@ namespace Autom8er
             }
 
             return false;
+        }
+    }
+
+    // Handles auto-feeding fish ponds (critters) and bug terrariums (honey),
+    // plus extracting roe and cocoons on day change.
+    // Uses Manhattan distance 3 radius because fish ponds are 5x5 multi-tile
+    // objects whose visual stone border extends beyond their onTileMap footprint.
+    public static class FishPondHelper
+    {
+        private static readonly int[] dx = { -1, 0, 1, 0 };
+        private static readonly int[] dy = { 0, -1, 0, 1 };
+        private const int SearchRadius = 3;
+
+        public static void TryFeedPondsAndTerrariums(Chest sourceChest, HouseDetails inside)
+        {
+            if (inside != null)
+                return;
+
+            HashSet<long> checkedPositions = new HashSet<long>();
+
+            if (TryFeedInRadius(sourceChest, sourceChest.xPos, sourceChest.yPos, checkedPositions))
+                return;
+
+            TryFeedViaConveyorPath(sourceChest, checkedPositions);
+        }
+
+        private static bool TryFeedInRadius(Chest sourceChest, int centerX, int centerY, HashSet<long> checkedPositions)
+        {
+            int mapW = WorldManager.Instance.onTileMap.GetLength(0);
+            int mapH = WorldManager.Instance.onTileMap.GetLength(1);
+
+            for (int ox = -SearchRadius; ox <= SearchRadius; ox++)
+            {
+                for (int oy = -SearchRadius; oy <= SearchRadius; oy++)
+                {
+                    if (ox == 0 && oy == 0)
+                        continue;
+
+                    if (Mathf.Abs(ox) + Mathf.Abs(oy) > SearchRadius)
+                        continue;
+
+                    int checkX = centerX + ox;
+                    int checkY = centerY + oy;
+
+                    if (checkX < 0 || checkY < 0 || checkX >= mapW || checkY >= mapH)
+                        continue;
+
+                    long key = ((long)checkX << 32) | (uint)checkY;
+                    if (checkedPositions.Contains(key))
+                        continue;
+                    checkedPositions.Add(key);
+
+                    if (TryFeedAtPosition(sourceChest, checkX, checkY))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        private static void TryFeedViaConveyorPath(Chest sourceChest, HashSet<long> checkedPositions)
+        {
+            if (Plugin.ConveyorTileType < 0)
+                return;
+
+            int mapW = WorldManager.Instance.onTileMap.GetLength(0);
+            int mapH = WorldManager.Instance.onTileMap.GetLength(1);
+            HashSet<long> visitedConveyors = new HashSet<long>();
+            Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
+
+            for (int i = 0; i < 4; i++)
+            {
+                int nx = sourceChest.xPos + dx[i];
+                int ny = sourceChest.yPos + dy[i];
+                if (nx < 0 || ny < 0) continue;
+
+                if (ConveyorHelper.IsConveyorTile(nx, ny, null))
+                {
+                    long key = ((long)nx << 32) | (uint)ny;
+                    if (visitedConveyors.Add(key))
+                        queue.Enqueue((nx, ny));
+                }
+            }
+
+            int maxSteps = 100;
+            while (queue.Count > 0 && maxSteps-- > 0)
+            {
+                var (cx, cy) = queue.Dequeue();
+
+                // Check radius around each conveyor tile
+                for (int ox = -SearchRadius; ox <= SearchRadius; ox++)
+                {
+                    for (int oy = -SearchRadius; oy <= SearchRadius; oy++)
+                    {
+                        if (Mathf.Abs(ox) + Mathf.Abs(oy) > SearchRadius)
+                            continue;
+
+                        int adjX = cx + ox;
+                        int adjY = cy + oy;
+                        if (adjX < 0 || adjY < 0 || adjX >= mapW || adjY >= mapH)
+                            continue;
+
+                        long adjKey = ((long)adjX << 32) | (uint)adjY;
+                        if (checkedPositions.Add(adjKey))
+                        {
+                            if (TryFeedAtPosition(sourceChest, adjX, adjY))
+                                return;
+                        }
+                    }
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = cx + dx[i];
+                    int ny = cy + dy[i];
+                    if (nx < 0 || ny < 0) continue;
+
+                    long key = ((long)nx << 32) | (uint)ny;
+                    if (visitedConveyors.Contains(key)) continue;
+
+                    if (ConveyorHelper.IsConveyorTile(nx, ny, null))
+                    {
+                        visitedConveyors.Add(key);
+                        queue.Enqueue((nx, ny));
+                    }
+                }
+            }
+        }
+
+        private static bool TryFeedAtPosition(Chest sourceChest, int checkX, int checkY)
+        {
+            int tileObjectId = WorldManager.Instance.onTileMap[checkX, checkY];
+
+            int rootX = checkX;
+            int rootY = checkY;
+
+            if (tileObjectId < -1)
+            {
+                Vector2 rootPos = WorldManager.Instance.findMultiTileObjectPos(checkX, checkY);
+                rootX = (int)rootPos.x;
+                rootY = (int)rootPos.y;
+                tileObjectId = WorldManager.Instance.onTileMap[rootX, rootY];
+            }
+
+            if (tileObjectId < 0)
+                return false;
+
+            TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
+            if (tileObj == null || tileObj.tileObjectChest == null)
+                return false;
+
+            ChestPlaceable chestPlaceable = tileObj.tileObjectChest;
+            bool isFishPond = chestPlaceable.isFishPond;
+            bool isTerrarium = chestPlaceable.isBugTerrarium;
+
+            if (!isFishPond && !isTerrarium)
+                return false;
+
+            Chest pondChest = ContainerManager.manage.getChestForWindow(rootX, rootY, null);
+            if (pondChest == null)
+                return false;
+
+            if (pondChest.itemIds[22] != -1)
+                return false;
+
+            return TryLoadFoodFromChest(sourceChest, rootX, rootY, isFishPond);
+        }
+
+        private static bool TryLoadFoodFromChest(Chest sourceChest, int pondX, int pondY, bool isFishPond)
+        {
+            int honeyId = ContainerManager.manage.fishPondManager.honeyItem.getItemId();
+
+            for (int slot = 0; slot < sourceChest.itemIds.Length; slot++)
+            {
+                int itemId = sourceChest.itemIds[slot];
+                int stack = sourceChest.itemStacks[slot];
+
+                if (itemId < 0 || stack <= 0)
+                    continue;
+
+                bool isValidFood = false;
+
+                if (isFishPond)
+                {
+                    // Fish ponds accept underwater creatures (critters)
+                    InventoryItem item = Inventory.Instance.allItems[itemId];
+                    if (item != null && (bool)item.underwaterCreature)
+                        isValidFood = true;
+                }
+                else
+                {
+                    // Bug terrariums accept honey
+                    if (itemId == honeyId)
+                        isValidFood = true;
+                }
+
+                if (!isValidFood)
+                    continue;
+
+                // KeepOneItem only applies to stackable items (critters don't stack); AutoSorters exempt
+                bool keepOne = Plugin.KeepOneItem && !ConveyorHelper.IsAutoSorter(sourceChest);
+                if (keepOne && Inventory.Instance.allItems[itemId].checkIfStackable() && stack < 2)
+                    continue;
+
+                // Load 1 food into slot 22
+                ContainerManager.manage.changeSlotInChest(pondX, pondY, 22, itemId, 1, null);
+
+                // Remove 1 from source chest
+                int remaining = stack - 1;
+                if (remaining <= 0)
+                {
+                    ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, -1, 0, null);
+                }
+                else
+                {
+                    ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, itemId, remaining, null);
+                }
+
+                string typeName = isFishPond ? "fish pond" : "bug terrarium";
+                Plugin.Log.LogInfo("Autom8er: Fed " + typeName + " at " + pondX + "," + pondY + ": " + Inventory.Instance.allItems[itemId].itemName);
+                return true;
+            }
+
+            return false;
+        }
+
+        // Called on day change to extract roe/cocoons from slot 23 into adjacent chests
+        public static void ProcessPondAndTerrariumOutput()
+        {
+            if (!NetworkMapSharer.Instance.isServer)
+                return;
+
+            HashSet<long> checkedPonds = new HashSet<long>();
+            List<Chest> chestsCopy = new List<Chest>(ContainerManager.manage.activeChests);
+
+            foreach (Chest chest in chestsCopy)
+            {
+                if (chest == null)
+                    continue;
+
+                // Skip special containers and input-only containers
+                HouseDetails inside = null;
+                if (chest.insideX != -1 && chest.insideY != -1)
+                    inside = HouseManager.manage.getHouseInfoIfExists(chest.insideX, chest.insideY);
+
+                // Ponds/terrariums are outdoor only
+                if (inside != null)
+                    continue;
+
+                if (ConveyorHelper.IsSpecialContainer(chest.xPos, chest.yPos, null))
+                    continue;
+
+                if (ConveyorHelper.IsInputOnlyContainer(chest.xPos, chest.yPos, null))
+                    continue;
+
+                // Check radius around chest for ponds/terrariums
+                int mapW = WorldManager.Instance.onTileMap.GetLength(0);
+                int mapH = WorldManager.Instance.onTileMap.GetLength(1);
+                for (int ox = -SearchRadius; ox <= SearchRadius; ox++)
+                {
+                    for (int oy = -SearchRadius; oy <= SearchRadius; oy++)
+                    {
+                        if (ox == 0 && oy == 0) continue;
+                        if (Mathf.Abs(ox) + Mathf.Abs(oy) > SearchRadius) continue;
+
+                        int adjX = chest.xPos + ox;
+                        int adjY = chest.yPos + oy;
+                        if (adjX < 0 || adjY < 0 || adjX >= mapW || adjY >= mapH) continue;
+
+                        TryExtractOutputAtPosition(adjX, adjY, chest, checkedPonds);
+                    }
+                }
+
+                // Also check via conveyor path
+                ExtractOutputViaConveyorPath(chest, checkedPonds);
+            }
+        }
+
+        private static void ExtractOutputViaConveyorPath(Chest targetChest, HashSet<long> checkedPonds)
+        {
+            if (Plugin.ConveyorTileType < 0)
+                return;
+
+            int mapW = WorldManager.Instance.onTileMap.GetLength(0);
+            int mapH = WorldManager.Instance.onTileMap.GetLength(1);
+            HashSet<long> visitedConveyors = new HashSet<long>();
+            Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
+
+            for (int i = 0; i < 4; i++)
+            {
+                int nx = targetChest.xPos + dx[i];
+                int ny = targetChest.yPos + dy[i];
+                if (nx < 0 || ny < 0) continue;
+
+                if (ConveyorHelper.IsConveyorTile(nx, ny, null))
+                {
+                    long key = ((long)nx << 32) | (uint)ny;
+                    if (visitedConveyors.Add(key))
+                        queue.Enqueue((nx, ny));
+                }
+            }
+
+            int maxSteps = 100;
+            while (queue.Count > 0 && maxSteps-- > 0)
+            {
+                var (cx, cy) = queue.Dequeue();
+
+                for (int ox = -SearchRadius; ox <= SearchRadius; ox++)
+                {
+                    for (int oy = -SearchRadius; oy <= SearchRadius; oy++)
+                    {
+                        if (Mathf.Abs(ox) + Mathf.Abs(oy) > SearchRadius) continue;
+
+                        int adjX = cx + ox;
+                        int adjY = cy + oy;
+                        if (adjX < 0 || adjY < 0 || adjX >= mapW || adjY >= mapH) continue;
+
+                        TryExtractOutputAtPosition(adjX, adjY, targetChest, checkedPonds);
+                    }
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = cx + dx[i];
+                    int ny = cy + dy[i];
+                    if (nx < 0 || ny < 0) continue;
+
+                    long key = ((long)nx << 32) | (uint)ny;
+                    if (visitedConveyors.Contains(key)) continue;
+
+                    if (ConveyorHelper.IsConveyorTile(nx, ny, null))
+                    {
+                        visitedConveyors.Add(key);
+                        queue.Enqueue((nx, ny));
+                    }
+                }
+            }
+        }
+
+        private static void TryExtractOutputAtPosition(int checkX, int checkY, Chest targetChest, HashSet<long> checkedPonds)
+        {
+            int tileObjectId = WorldManager.Instance.onTileMap[checkX, checkY];
+
+            // Handle multi-tile
+            int rootX = checkX;
+            int rootY = checkY;
+
+            if (tileObjectId < -1)
+            {
+                Vector2 rootPos = WorldManager.Instance.findMultiTileObjectPos(checkX, checkY);
+                rootX = (int)rootPos.x;
+                rootY = (int)rootPos.y;
+                tileObjectId = WorldManager.Instance.onTileMap[rootX, rootY];
+            }
+
+            if (tileObjectId < 0)
+                return;
+
+            // Avoid double-processing the same pond
+            long pondKey = ((long)rootX << 32) | (uint)rootY;
+            if (checkedPonds.Contains(pondKey))
+                return;
+            checkedPonds.Add(pondKey);
+
+            TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
+            if (tileObj == null || tileObj.tileObjectChest == null)
+                return;
+
+            ChestPlaceable chestPlaceable = tileObj.tileObjectChest;
+            bool isFishPond = chestPlaceable.isFishPond;
+            bool isTerrarium = chestPlaceable.isBugTerrarium;
+
+            if (!isFishPond && !isTerrarium)
+                return;
+
+            Chest pondChest = ContainerManager.manage.getChestForWindow(rootX, rootY, null);
+            if (pondChest == null)
+                return;
+
+            // Check if output slot 23 has anything
+            int outputId = pondChest.itemIds[23];
+            int outputStack = pondChest.itemStacks[23];
+
+            if (outputId < 0 || outputStack <= 0)
+                return;
+
+            // Determine how much to extract
+            int extractAmount = outputStack;
+
+            if (Plugin.HoldOutputForBreeding)
+            {
+                // Count creatures in slots 0-4
+                int creatureCount = 0;
+                for (int s = 0; s < 5; s++)
+                {
+                    if (pondChest.itemIds[s] != -1)
+                        creatureCount++;
+                }
+
+                if (creatureCount < 5)
+                {
+                    // Hold roe/cocoons for breeding
+                    int holdAmount = isFishPond ? 15 : 10;
+                    extractAmount = outputStack - holdAmount;
+
+                    if (extractAmount <= 0)
+                        return; // Not enough to extract yet
+                }
+                // If full (5 creatures), extract everything
+            }
+
+            // Deposit into the target chest
+            if (HarvestHelper.TryDepositHarvestToChest(targetChest, null, outputId, extractAmount))
+            {
+                // Update the pond's slot 23
+                int remaining = outputStack - extractAmount;
+                if (remaining <= 0)
+                {
+                    ContainerManager.manage.changeSlotInChest(rootX, rootY, 23, -1, 0, null);
+                }
+                else
+                {
+                    ContainerManager.manage.changeSlotInChest(rootX, rootY, 23, outputId, remaining, null);
+                }
+
+                string typeName = isFishPond ? "fish pond" : "bug terrarium";
+                string itemName = Inventory.Instance.allItems[outputId].itemName;
+                Plugin.Log.LogInfo("Autom8er: Extracted " + extractAmount + "x " + itemName + " from " + typeName + " at " + rootX + "," + rootY);
+            }
         }
     }
 }

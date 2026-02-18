@@ -1,6 +1,6 @@
-# Autom8er v1.2.0
+# Autom8er v1.4.0
 
-Automation and conveyor belts for Dinkum machines.
+Automation and conveyor belts for Dinkum machines, fish ponds, bug terrariums, crab pots, silos, and more.
 
 ## Installation
 
@@ -23,17 +23,44 @@ Place any chest or crate next to a machine:
 - **Auto-Output:** Machine outputs go into adjacent chest (not dropped on ground)
 - **Auto-Input:** If chest has valid materials, machine auto-reloads and starts again
 
+### Fish Ponds
+Place a chest within 3 tiles of a fish pond:
+- Auto-loads critters (underwater creatures) from chest into food slot
+- Extracts roe into adjacent chests on day change
+- Smart breeding hold: keeps 15 roe when < 5 fish to allow breeding (configurable)
+
+### Bug Terrariums
+Place a chest within 3 tiles of a bug terrarium:
+- Auto-loads honey from chest into food slot
+- Extracts cocoons into adjacent chests on day change
+- Smart breeding hold: keeps 10 cocoons when < 5 bugs to allow breeding (configurable)
+
+### Crab Pots
+Place a chest within 2 tiles of crab pots:
+- Auto-loads bait from chest into crab pots
+- Auto-harvests catches into adjacent chests on day change
+
+### Silos
+Place a chest next to a silo to auto-fill with feed.
+
+### Auto Sorters
+Auto Sorters work as automation input/output chests:
+- Exempt from KeepOneItem (empties completely)
+- Items deposited by automation trigger the sorter to fire to nearby matching chests
+- Use as machine output to auto-distribute products to sorted storage
+
+### Auto Placers
+Auto Placers function as standard automation chests.
+
 ### White Crates/Chests = INPUT ONLY
 White Wooden Crate and White Wooden Chest are special:
 - CAN feed materials into machines
 - WON'T receive outputs from machines
-- Perfect for dedicated input stations
 
 ### Black Marble Path = Conveyor Belt
 Connect machines to distant chests using Black Marble Path tiles:
 - Machines touching the path can send outputs to any chest on the network
 - Chests touching the path can feed materials to any machine on the network
-- Build complex factory layouts with routed conveyor systems
 
 **Example Layout:**
 ```
@@ -48,20 +75,13 @@ All machines with ItemChanger component:
 - BBQ, Camp Oven, Camp Fire (Cooking)
 - Keg (Brewing)
 - Table Saw (Sawing)
+- Charging Station (Tools)
 - And more!
 
 ## Supported Containers
-All standard storage containers:
-- Wooden Crate, Wooden Chest
-- Iron Chest
-- Painted crates/chests (all colors)
-- And more!
+All standard storage containers plus Auto Sorters and Auto Placers.
 
 **Excluded (special containers):**
-- Fish Ponds
-- Bug Terrariums
-- Auto Sorters
-- Auto Placers
 - Mannequins
 - Tool Racks
 - Display Stands
@@ -76,20 +96,25 @@ BepInEx/config/topmass.autom8er.cfg
 **Settings:**
 ```ini
 [Automation]
-## Keep one item in chest slots to maintain placeholders for easy stacking.
-## When enabled, requires 1 extra item beyond what the machine needs before it will take from a slot.
-## Example: Furnace needs 5 ore - will only take from stacks of 6+, leaving 1 behind.
+## Keep one item in chest slots to maintain placeholders.
+## Auto Sorters are always exempt from this setting.
 KeepOneItem = false
+
+## Auto-feed fish ponds and bug terrariums from adjacent chests.
+AutoFeedPondsAndTerrariums = true
+
+## Hold roe/cocoons for breeding when creatures < 5.
+HoldOutputForBreeding = true
+
+## Silo fill speed per tick (1-10).
+SiloFillSpeed = 1
 
 [Conveyor]
 ## Item ID of the floor/path tile to use as conveyor belt.
-## Examples: Black Marble Path (1747), Cobblestone Path (964), Rock Path (346), Iron Path (775), Brick Path (15)
 ConveyorTileItemId = 1747
 
 [Performance]
-## How often to scan chests and feed machines (in seconds).
-## Default: 0.3 (about 3 times per second)
-## Lower = faster automation but more CPU usage. Range: 0.1 to 1.0
+## How often to scan chests and feed machines (in seconds). Range: 0.1 to 1.0
 ScanInterval = 0.3
 ```
 
@@ -101,16 +126,6 @@ ScanInterval = 0.3
 | 775 | Iron Path |
 | 964 | Cobblestone Path |
 | 1747 | Black Marble Path (default) |
-
-**KeepOneItem:**
-- Default `false` = Takes all items needed, may empty slots
-- Set to `true` = Always leaves 1 item behind in each slot
-- Useful for keeping placeholder items so returning loot auto-stacks into existing slots
-
-**ScanInterval:**
-- Default `0.3` = Scans about 3 times per second (fast and responsive)
-- Set to `0.2` for faster automation
-- Set to `0.5` for more relaxed/lower CPU usage
 
 ## Requirements
 
