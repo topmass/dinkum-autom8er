@@ -3,6 +3,7 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using Mirror;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -29,6 +30,10 @@ namespace Autom8er
         // TileObject IDs for INPUT ONLY containers (won't receive machine outputs)
         public const int WHITE_CRATE_TILE_ID = 417;
         public const int WHITE_CHEST_TILE_ID = 430;
+
+        // TileObject IDs for OUTPUT ONLY containers (won't feed machines)
+        public const int BLACK_CRATE_TILE_ID = 410;
+        public const int BLACK_CHEST_TILE_ID = 421;
 
         // Cached at runtime from item data
         public static int ConveyorTileType = -1;
@@ -187,6 +192,10 @@ namespace Autom8er
                 {
                     inside = HouseManager.manage.getHouseInfoIfExists(chest.insideX, chest.insideY);
                 }
+
+                // Skip output-only containers (black crate/chest) — they receive but never feed
+                if (ConveyorHelper.IsOutputOnlyContainer(chest.xPos, chest.yPos, inside))
+                    continue;
 
                 // Try to feed fish ponds and bug terrariums (before machine checks,
                 // since critters have itemChange and would get caught by TryFeedAdjacentMachine)
@@ -569,12 +578,9 @@ namespace Autom8er
                     itemId, amount, inside);
             }
 
-            // Trigger AutoSorter to fire items to nearby chests
+            // Queue AutoSorter to batch-fire items to nearby chests
             if (ConveyorHelper.IsAutoSorter(chest))
-            {
-                ContainerManager.manage.StartCoroutine(
-                    ContainerManager.manage.AutoSortItemsIntoNearbyChests(chest));
-            }
+                ConveyorHelper.QueueAutoSorterUpdate(chest);
 
             return true;
         }
@@ -1122,6 +1128,9 @@ namespace Autom8er
                         itemId, stackAmount, inside);
                 }
 
+                if (IsAutoSorter(chest))
+                    QueueAutoSorterUpdate(chest);
+
                 return true;
             }
 
@@ -1235,6 +1244,9 @@ namespace Autom8er
                             itemId, stackAmount, inside);
                     }
 
+                    if (IsAutoSorter(chest))
+                        QueueAutoSorterUpdate(chest);
+
                     return true;
                 }
             }
@@ -1274,6 +1286,15 @@ namespace Autom8er
                 return false;
 
             return tileObjectId == Plugin.WHITE_CRATE_TILE_ID || tileObjectId == Plugin.WHITE_CHEST_TILE_ID;
+        }
+
+        public static bool IsOutputOnlyContainer(int x, int y, HouseDetails inside)
+        {
+            int tileObjectId = GetTileObjectId(x, y, inside);
+            if (tileObjectId < 0)
+                return false;
+
+            return tileObjectId == Plugin.BLACK_CRATE_TILE_ID || tileObjectId == Plugin.BLACK_CHEST_TILE_ID;
         }
 
         public static bool ChestHasItems(Chest chest)
@@ -1327,6 +1348,10 @@ namespace Autom8er
             if (tileObj == null || tileObj.tileObjectChest == null)
                 return null;
 
+            // Skip machines with internal inventory (gacha machines, etc.)
+            if (tileObj.tileObjectItemChanger != null)
+                return null;
+
             Chest chest = ContainerManager.manage.getChestForWindow(x, y, inside);
 
             if (chest == null)
@@ -1361,6 +1386,45 @@ namespace Autom8er
         public static bool IsAutoSorter(Chest chest)
         {
             return chest != null && chest.IsAutoSorter();
+        }
+
+        // Debounced AutoSorter triggering — batches rapid deposits into full-stack fires
+        private static HashSet<long> pendingSorts = new HashSet<long>();
+
+        public static void QueueAutoSorterUpdate(Chest chest)
+        {
+            long key = ((long)chest.xPos << 32) | (uint)chest.yPos;
+            if (pendingSorts.Add(key))
+            {
+                ContainerManager.manage.StartCoroutine(AutoSorterBatchSort(chest, key));
+            }
+        }
+
+        private static IEnumerator AutoSorterBatchSort(Chest chest, long key)
+        {
+            // Initial delay: let items accumulate from multiple machines
+            yield return new WaitForSeconds(1.0f);
+
+            // Cycle through slots until empty or no valid targets remain
+            int maxCycles = 24;
+            while (maxCycles-- > 0)
+            {
+                bool hasItems = false;
+                for (int i = 0; i < chest.itemIds.Length; i++)
+                {
+                    if (chest.itemIds[i] != -1) { hasItems = true; break; }
+                }
+                if (!hasItems) break;
+
+                // Fire one slot via game's sort (has 0.5s internal delay + handles full stack)
+                yield return ContainerManager.manage.StartCoroutine(
+                    ContainerManager.manage.AutoSortItemsIntoNearbyChests(chest));
+
+                // Brief pause for more items to accumulate before next slot
+                yield return new WaitForSeconds(0.5f);
+            }
+
+            pendingSorts.Remove(key);
         }
 
         public static int FindSlotForItem(Chest chest, int itemId)

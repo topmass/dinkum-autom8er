@@ -1,0 +1,217 @@
+[center]AutoM8er - Dinkum Automation Mod
+
+[img]https://pub-090b24a7d5b74ac1bb11f2b8fbc17910.r2.dev/Copy%20text%20Untitled%20Project.gif[/img]
+
+[b][size=6]AUTOM8ER[/size][/b]
+[b]MAKE YOUR DINKUM FACTORY DREAMS COME TRUE![/b]
+Version 1.4.0 by topmass
+
+Black Marble Path Tiles are used for conveyors by default - the config file allows you to change to any path you choose :)[/center]
+
+[line]
+
+[center][size=5][b]What's New in 1.4.0[/b][/size][/center]
+
+[b]Fish Pond Automation[/b]
+- Place a chest within 3 tiles of a fish pond and critters will automatically load from the chest into the food slot
+- Roe is extracted into adjacent chests each morning
+- Smart Breeding Hold: keeps 15 roe in the pond when fewer than 5 fish to allow breeding - once full (5 fish) all roe is extracted immediately
+- Works with conveyor belt networks
+
+[b]Bug Terrarium Automation[/b]
+- Place a chest within 3 tiles of a bug terrarium and honey will automatically load from the chest into the food slot
+- Cocoons are extracted into adjacent chests each morning
+- Smart Breeding Hold: keeps 10 cocoons when fewer than 5 bugs to allow breeding - once full all cocoons are extracted
+- Works with conveyor belt networks
+
+[b]Auto Sorter Integration[/b]
+- Auto Sorters now work as automation input/output chests
+- When machines deposit items into an Auto Sorter it automatically fires those items to nearby chests that have matching items
+- Exempt from KeepOneItem so it empties completely
+- Smart batching prevents lag when many machines deposit at once
+- Use as your machine output chest to auto-distribute products to sorted storage
+
+[b]Black Crate / Black Chest = OUTPUT ONLY[/b]
+- Black Wooden Crate and Black Wooden Chest are now output-only containers
+- They receive outputs from machines but will never feed materials into machines
+- The opposite of the white crate/chest input-only behaviour
+
+[b]Auto Placer Support[/b]
+- Auto Placers now function as standard automation chests for input and output
+
+[b]Bug Fixes[/b]
+- Fixed ghost chest creation near gacha machines that could cause items to vanish
+- Fixed Auto Sorter only firing when manually opened by the player
+
+[line]
+
+[center][size=5][b]Features[/b][/size][/center]
+
+[b][size=4]Machine Automation[/size][/b]
+Place any chest or crate next to a machine - that's it!
+- [b]Auto-Output:[/b] Machine finishes and the product goes straight into the adjacent chest
+- [b]Auto-Input:[/b] Chest has valid materials? The machine reloads and starts again automatically
+- Works with ALL processing machines: Furnaces, Stone Grinder, Grain Mill, BBQ, Camp Oven, Camp Fire, Keg, Table Saw, Charging Station, and more
+
+[b][size=4]Conveyor Belt Networks[/size][/b]
+Black Marble Path tiles form conveyor networks that route items between distant chests and machines:
+- Place Black Marble Path in connected lines
+- Machines adjacent to the path send outputs to any chest on the network
+- Chests touching the path feed materials to any machine on the network
+- Works with all automation features: machines, fish ponds, terrariums, crab pots, silos
+
+[b][size=4]Special Chests[/size][/b]
+
+[b]White Wooden Crate / White Wooden Chest = INPUT ONLY[/b]
+- CAN feed materials into machines
+- WON'T receive outputs from machines
+- Paint a regular crate/chest white to create one (white paint drops in the mines)
+
+[b]Black Wooden Crate / Black Wooden Chest = OUTPUT ONLY[/b]
+- CAN receive outputs from machines
+- WON'T feed materials into machines
+- Paint a regular crate/chest black to create one
+
+[b]Auto Sorter = Smart I/O[/b]
+- Works as both input and output for automation
+- Automatically fires items to nearby chests that already have matching items
+- Exempt from KeepOneItem so it empties completely
+- Great as a machine output to auto-distribute products to your sorted storage
+
+[b]Auto Placer[/b]
+- Functions as a standard automation chest (input + output)
+
+[b][size=4]Fish Ponds[/size][/b]
+Place a chest within 3 tiles of a fish pond:
+- Auto-loads critters (underwater creatures) from chest into the food slot
+- Extracts roe into adjacent chests each morning
+- Smart Breeding Hold: keeps 15 roe when fewer than 5 fish to allow breeding (configurable)
+
+[b][size=4]Bug Terrariums[/size][/b]
+Place a chest within 3 tiles of a bug terrarium:
+- Auto-loads honey from chest into the food slot
+- Extracts cocoons into adjacent chests each morning
+- Smart Breeding Hold: keeps 10 cocoons when fewer than 5 bugs to allow breeding (configurable)
+
+[b][size=4]Crab Pots[/size][/b]
+Place a chest within 2 tiles of crab pots (they sit in water so you need the extra reach):
+- Auto-loads bait from chest into crab pots
+- Caught fish and critters deposit to nearby chests on day change
+- This pairs well with a mod that allows fish to stack!
+[i]Chests can fill up quickly and traps will splash as normal if there is no room to output items. Feel free to add more than one chest to a conveyor array![/i]
+
+[b][size=4]Silos[/size][/b]
+Place a chest next to a silo:
+- Automatically fills the silo with Animal Food from the chest
+- Visual fill effect as it loads
+- Configurable fill speed (1-5 per tick)
+- Works with KeepOneItem (fills to 199 instead of 200)
+
+[b][size=4]Day-Change Harvests[/size][/b]
+These machines automatically harvest into nearby chests each morning:
+- Bee Houses - Honey collection
+- Key Cutters - Duplicated keys
+- Worm Farms - Worm harvesting
+- Crab Pots - Fish and critter collection
+- Incubators load fertilized eggs automatically but are NEVER harvested - your chooks are safe!
+
+[line]
+
+[center][size=5][b]Screenshots[/b][/size][/center]
+
+[b]Basic Processing Station Automation[/b]
+Place a container directly in front of any processing station. Add items and close the chest - machines start automatically and processed items transfer to the container.
+[img]https://pub-090b24a7d5b74ac1bb11f2b8fbc17910.r2.dev/Screenshot_20251222_131412.png[/img]
+
+[b]Auto Placer Setup[/b]
+Autom8er works great with the Auto Placer!
+[img]https://pub-090b24a7d5b74ac1bb11f2b8fbc17910.r2.dev/Screenshot_20251222_130926.png[/img]
+
+[b]Conveyor Belt Network[/b]
+Black Marble Path tiles connect machines to distant chests. Items route through the network automatically.
+[img]https://pub-090b24a7d5b74ac1bb11f2b8fbc17910.r2.dev/Screenshot_20251222_131243.png[/img]
+
+[b]White Crate - Input Only[/b]
+The white crate feeds materials into all machines on the conveyor network but never receives outputs.
+[img]https://pub-090b24a7d5b74ac1bb11f2b8fbc17910.r2.dev/Screenshot_20251222_130059.png[/img]
+
+[b]Silo Automation[/b]
+Place a chest next to a silo and watch it fill up automatically.
+[img]https://pub-090b24a7d5b74ac1bb11f2b8fbc17910.r2.dev/Screenshot_20260113_162840.png[/img]
+
+[b]Crab Pot Setup[/b]
+Chests within 2 tiles auto-bait and auto-harvest your crab pots.
+[img]https://pub-090b24a7d5b74ac1bb11f2b8fbc17910.r2.dev/Screenshot_20260113_152653.png[/img]
+
+[line]
+
+[center][size=5][b]Installation[/b][/size][/center]
+
+1. Install [url=https://docs.bepinex.dev/articles/user_guide/installation/index.html]BepInEx 6.0.0-pre.1[/url] for Dinkum
+2. Drop [b]topmass.autom8er.dll[/b] into your [b]BepInEx/plugins[/b] folder
+3. Launch the game
+4. Adjust settings in [b]BepInEx/config/topmass.autom8er.cfg[/b]
+
+[line]
+
+[center][size=5][b]Configuration[/b][/size][/center]
+
+After first run a config file is created at [b]BepInEx/config/topmass.autom8er.cfg[/b]
+
+[b]Automation Settings[/b]
+[list]
+[*] [b]KeepOneItem[/b] (default: false) - Keep 1 item per slot as a placeholder for easy stacking. Auto Sorters are always exempt.
+[*] [b]AutoFeedPondsAndTerrariums[/b] (default: true) - Auto-feed fish ponds and bug terrariums from adjacent chests.
+[*] [b]HoldOutputForBreeding[/b] (default: true) - Hold roe/cocoons for breeding when creatures are fewer than 5.
+[*] [b]SiloFillSpeed[/b] (default: 2) - Animal Food items loaded per tick (1-5).
+[/list]
+
+[b]Conveyor Settings[/b]
+[list]
+[*] [b]ConveyorTileItemId[/b] (default: 1747) - Which path tile acts as a conveyor belt.
+[/list]
+
+[b]Common Path IDs:[/b]
+- 1747 - Black Marble Path (default)
+- 964 - Cobblestone Path
+- 346 - Rock Path
+- 775 - Iron Path
+- 15 - Brick Path
+
+[b]Performance Settings[/b]
+[list]
+[*] [b]ScanInterval[/b] (default: 0.3) - Seconds between automation scans (0.1 to 1.0). Lower is faster but uses more CPU. Recommended 0.2-0.3 for fast setups, 0.5 for relaxed.
+[/list]
+
+[line]
+
+[center][size=5][b]Supported Containers[/b][/size][/center]
+
+All standard storage containers plus Auto Sorters and Auto Placers.
+
+[b]Excluded (not affected by automation):[/b]
+- Mannequins
+- Tool Racks
+- Display Stands
+
+[line]
+
+[center][size=5][b]Update History[/b][/size][/center]
+
+[b]1.4.0[/b] - Fish pond automation, bug terrarium automation, smart breeding hold, Auto Sorter as smart I/O chest with batched firing, black crate/chest output-only, Auto Placer support, ghost chest fix, Auto Sorter trigger fix
+
+[b]1.3.1[/b] - Chook/incubator automation, fixed incubator egg disappearing bug
+
+[b]1.3.0[/b] - Silo automation with visual fill, crab pot automation (bait + harvest), bee house/key cutter/worm farm day-change harvests, charging station fix, SiloFillSpeed config
+
+[b]1.2.0[/b] - KeepOneItem config, configurable scan speed
+
+[b]1.1.0[/b] - Switched to Black Marble Path conveyors (configurable), full mod overhaul for Dinkum 1.0.7
+
+[b]1.0.0[/b] - Initial release with auto I/O and conveyor system
+
+[line]
+
+[center]Huge thanks to Snaitf for providing the previous version source code for inspiration, Tanyrus (TR Mod Tools API Creator) for guidance, and James for making Dinkum.
+
+This mod was created due to my love of modded Minecraft.[/center]

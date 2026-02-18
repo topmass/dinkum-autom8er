@@ -57,6 +57,11 @@ White Wooden Crate and White Wooden Chest are special:
 - CAN feed materials into machines
 - WON'T receive outputs from machines
 
+### Black Crates/Chests = OUTPUT ONLY
+Black Wooden Crate and Black Wooden Chest are special:
+- CAN receive outputs from machines
+- WON'T feed materials into machines
+
 ### Black Marble Path = Conveyor Belt
 Connect machines to distant chests using Black Marble Path tiles:
 - Machines touching the path can send outputs to any chest on the network
