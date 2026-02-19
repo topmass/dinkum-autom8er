@@ -68,7 +68,7 @@ if (onTileMap[x, y] < -1)
 
 ## Code Structure
 
-### Plugin.cs Layout (~2800+ lines)
+### Plugin.cs Layout (~2750 lines)
 ```
 Autom8er namespace
 ├── Plugin : BaseUnityPlugin
@@ -106,6 +106,11 @@ Autom8er namespace
 │       - Calls ConveyorAnimator.ClearAllAnimations()
 │       - Executes all pending deposit callbacks (no item loss)
 │
+├── LoadGameStateClearPatch [HarmonyPatch]
+│   └── Prefix on SaveLoad.loadOverFrames()
+│       - Clears pendingSorts (stale coroutine refs from previous session)
+│       - Clears all animations
+│
 ├── HarvestHelper (static class)
 │   ├── ProcessHarvestableMachines() - Entry point on day change
 │   ├── ScanAndHarvestAllChests() - Scan all chests + conveyor networks
@@ -133,7 +138,9 @@ Autom8er namespace
 │   │   └── Filters out tileObjectItemChanger (gacha machines, etc.)
 │   ├── IsAutoSorter() - Check if chest is Auto Sorter
 │   ├── QueueAutoSorterUpdate() - Debounced trigger for Auto Sorter firing
-│   ├── AutoSorterBatchSort() - Coroutine: 1s delay, then fire slots one at a time
+│   ├── AutoSorterBatchSort() - Coroutine: 1s delay, activate nearby chests, then fire slots
+│   ├── EnsureNearbyChestsActive() - Load destination chests into activeChests from save data
+│   ├── EnsureAutoSorterStatusClean() - Fix stale onTileStatusMap after save/load
 │   ├── FindSlotForItem() - Find slot for stacking or empty slot
 │   └── ChestHasItems() - Check if chest has any items
 │
@@ -278,7 +285,9 @@ All conveyor transfers now show items visually sliding along the path. The syste
    - `QueueAutoSorterUpdate(chest)` uses `HashSet<long> pendingSorts` keyed by `(xPos << 32 | yPos)`
    - If key is new: starts `AutoSorterBatchSort` coroutine, adds key to set
    - If key exists: skips (coroutine already running for this sorter)
-   - `AutoSorterBatchSort`: 1s initial delay (accumulation window), then loops up to 24 cycles calling game's `AutoSortItemsIntoNearbyChests` with 0.5s pauses between each, exits when empty, removes key from set
+   - `AutoSorterBatchSort`: 1s initial delay (accumulation window), `EnsureNearbyChestsActive()` once, then loops up to 24 cycles calling game's `AutoSortItemsIntoNearbyChests` with 0.5s pauses between each, exits when empty, removes key from set
+5. **First-load activation** — `EnsureNearbyChestsActive()` scans 10-tile radius for chest tile objects and loads them from save data into `activeChests` via `getChestForRecycling()`. Runs once per sort batch, no-op if chests already active
+6. **Stale status cleanup** — `EnsureAutoSorterStatusClean()` resets `onTileStatusMap` to 0 if `playingLookingInside` is 0 but status was non-zero (stale from save data)
 
 ### Fish Pond Automation
 **Chest layout:** 24 slots total — slots 0-4 = creatures, slot 22 = food input, slot 23 = output (roe)
@@ -446,6 +455,9 @@ Every animated transfer MUST: (1) ReserveTarget before animation, (2) UnreserveT
 ### 12. No dropAnItem in Callbacks
 Never use `WorldManager.Instance.dropAnItem()` in animation callbacks — it creates ghost items (visual-only, can't be picked up) when called from Update context. Use `FallbackDepositToAnyChest()` instead, which BFS-searches for any valid chest on the conveyor network.
 
+### 13. activeChests Is Lazily Populated
+`ContainerManager.manage.activeChests` is NOT pre-populated on game load. Chests are only added when explicitly loaded via `getChestForRecycling()` or `getChestSaveOrCreateNewOne()`. On first game load, many chests exist in save data but aren't in `activeChests` until something touches them. Any code that iterates `activeChests` to find targets (like `AutoSortItemsIntoNearbyChests`) will find nothing if destination chests haven't been activated yet. Use `EnsureNearbyChestsActive()` pattern to pre-load chests from save data before scanning.
+
 ---
 
 ## Special Containers
@@ -599,6 +611,7 @@ Inventory.Instance.allItems[id].underwaterCreature  // pond food check (referenc
 2. Target chests must be within 10 tiles
 3. Check that debounce coroutine is running (1s initial delay before first fire)
 4. Auto Sorter fires ONE slot per cycle with 0.5s pauses between — large inventories take time
+5. On first game load, destination chests must be in `activeChests` — `EnsureNearbyChestsActive()` handles this
 
 ### Incubator Not Loading
 1. Uses `TileObjectGrowthStages.itemsToPlace[]` — same system as crab pots
@@ -673,3 +686,9 @@ The `NewDayHarvestPatch` hooks into `refreshAllChunksNewDay()`, but chunk data i
 
 ### 13. Animation Tile-to-World Must Match Game Placement
 The game places objects at `new Vector3(xPos * 2, heightMap[xPos, yPos], yPos * 2)` — confirmed in `NetworkMapSharer.cs:1561`. Initially the animation used `x*2+1, y*2+1` which caused items to slide along the edge of tiles instead of the center. The correct formula has NO centering offset.
+
+### 14. activeChests Lazy Loading Causes Silent Auto Sort Failure
+On first game load from main menu, `loadOverFrames()` loads all save data but does NOT add chests to `activeChests`. Chests are only activated on-demand. The game's `AutoSortItemsIntoNearbyChests` iterates `activeChests` to find destination chests within 10 tiles. If destinations aren't active, the sort silently does nothing — no error, no log. Fix: scan the 10-tile radius for chest tile objects on `onTileMap` and call `getChestForRecycling()` for each before sorting. This is safe to call repeatedly — it returns the existing active chest if already loaded.
+
+### 15. onTileStatusMap Persists Across Save/Load but playingLookingInside Doesn't
+`WorldManager.Instance.onTileStatusMap` is saved/loaded from disk. `Chest.playingLookingInside` defaults to 0 on creation (not saved). After loading, a chest can have `onTileStatusMap != 0` (stale from previous session where a player had it open) but `playingLookingInside == 0`. The game's `AutoSortItemsIntoNearbyChests` checks `onTileStatusMap != 0` as a guard and silently aborts. Only furniture tile statuses are zeroed before save (SaveLoad.cs:3316-3319) — auto sorters are NOT furniture.
