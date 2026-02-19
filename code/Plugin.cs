@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.4.0")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.5.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -23,6 +23,8 @@ namespace Autom8er
         private ConfigEntry<int> configSiloFillSpeed;
         private ConfigEntry<bool> configAutoFeedPonds;
         private ConfigEntry<bool> configHoldOutputForBreeding;
+        private ConfigEntry<bool> configAnimationEnabled;
+        private ConfigEntry<float> configAnimationSpeed;
 
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
@@ -40,9 +42,11 @@ namespace Autom8er
         public static int ConveyorTileItemId = DEFAULT_CONVEYOR_TILE_ITEM_ID;
         public static bool KeepOneItem = false;
         public static float ScanInterval = 0.3f;
-        public static int SiloFillSpeed = 2;
+        public static int SiloFillSpeed = 10;
         public static bool AutoFeedPonds = true;
         public static bool HoldOutputForBreeding = true;
+        public static bool AnimationEnabled = true;
+        public static float AnimationSpeed = 2f;
 
         private void Awake()
         {
@@ -80,10 +84,10 @@ namespace Autom8er
             configSiloFillSpeed = Config.Bind(
                 "Automation",
                 "SiloFillSpeed",
-                2,
+                10,
                 "How many Animal Food items to load into silos per tick.\n" +
-                "Default: 2 (balanced visual fill effect)\n" +
-                "Range: 1-5. Higher = faster filling but less visual effect."
+                "Default: 10 (5% of silo capacity). Each item animates individually on the conveyor.\n" +
+                "Range: 1-20. Higher = faster filling."
             );
 
             configAutoFeedPonds = Config.Bind(
@@ -105,22 +109,42 @@ namespace Autom8er
                 "Disable to always extract all output regardless of creature count."
             );
 
+            configAnimationEnabled = Config.Bind(
+                "Conveyor Animation",
+                "AnimationEnabled",
+                true,
+                "Show items visually moving along conveyor paths.\n" +
+                "Disable to transfer items instantly without animation (may improve performance)."
+            );
+
+            configAnimationSpeed = Config.Bind(
+                "Conveyor Animation",
+                "AnimationSpeed",
+                2f,
+                "Speed of conveyor animations in tiles per second.\n" +
+                "Default: 2 (smooth, visible movement)\n" +
+                "Range: 0.5 to 10. Higher = faster animations."
+            );
+
             ConveyorTileItemId = configConveyorTileItemId.Value;
             KeepOneItem = configKeepOneItem.Value;
             ScanInterval = Mathf.Clamp(configScanInterval.Value, 0.1f, 1.0f);
-            SiloFillSpeed = Mathf.Clamp(configSiloFillSpeed.Value, 1, 5);
+            SiloFillSpeed = Mathf.Clamp(configSiloFillSpeed.Value, 1, 20);
             AutoFeedPonds = configAutoFeedPonds.Value;
             HoldOutputForBreeding = configHoldOutputForBreeding.Value;
+            AnimationEnabled = configAnimationEnabled.Value;
+            AnimationSpeed = Mathf.Clamp(configAnimationSpeed.Value, 0.5f, 10f);
 
-            Log.LogInfo("Autom8er v1.4.0 loaded!");
+            Log.LogInfo("Autom8er v1.5.0 loaded!");
+            Log.LogInfo("- Conveyor animations: visual item movement along paths");
             Log.LogInfo("- Silos: auto-fill from chests (configurable speed)");
             Log.LogInfo("- Crab pots: auto-bait loading + harvest via conveyors");
             Log.LogInfo("- Bee houses, key cutters, worm farms (harvest on day change)");
             Log.LogInfo("- All ItemChanger machines supported (furnaces, etc)");
             Log.LogInfo("- Charging stations (skips full durability)");
-            Log.LogInfo("- White crates/chests = INPUT ONLY");
+            Log.LogInfo("- White crates/chests = INPUT ONLY, Black = OUTPUT ONLY");
             Log.LogInfo("- Fish ponds & terrariums: auto-feed + harvest on day change");
-            Log.LogInfo("Config: ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding);
+            Log.LogInfo("Config: ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -141,6 +165,9 @@ namespace Autom8er
             {
                 CacheConveyorTileType();
             }
+
+            // Update conveyor animations every frame for smooth movement
+            ConveyorAnimator.UpdateAnimations();
 
             scanTimer += Time.deltaTime;
             if (scanTimer >= ScanInterval)
@@ -222,6 +249,7 @@ namespace Autom8er
 
         private void OnDestroy()
         {
+            ConveyorAnimator.ClearAllAnimations();
             harmony?.UnpatchSelf();
         }
     }
@@ -317,9 +345,23 @@ namespace Autom8er
                 int itemId = __instance.getCrabTrapDrop(xPos, yPos);
                 if (itemId != -1)
                 {
-                    harvestedAny = HarvestHelper.TryDepositHarvestToChest(targetChest, inside, itemId, 1);
-                    if (harvestedAny)
+                    int slotCheck = ConveyorHelper.FindSlotForItem(targetChest, itemId);
+                    if (slotCheck != -1)
                     {
+                        harvestedAny = true;
+                        int capturedItemId = itemId;
+                        Chest capturedChest = targetChest;
+                        HouseDetails capturedInside = inside;
+                        System.Action depositHarvest = () =>
+                        {
+                            if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1))
+                                ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1);
+                        };
+
+                        ConveyorAnimator.AnimateTransfer(itemId, 1,
+                            new Vector2Int(xPos, yPos),
+                            new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest);
+
                         Plugin.Log.LogInfo("Autom8er: Crab pot harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                     }
                 }
@@ -339,9 +381,23 @@ namespace Autom8er
 
                         for (int i = 0; i < numSpots; i++)
                         {
-                            if (HarvestHelper.TryDepositHarvestToChest(targetChest, inside, itemId, 1))
+                            int slotCheck = ConveyorHelper.FindSlotForItem(targetChest, itemId);
+                            if (slotCheck != -1)
                             {
                                 harvestedAny = true;
+                                int capturedItemId = itemId;
+                                Chest capturedChest = targetChest;
+                                HouseDetails capturedInside = inside;
+                                System.Action depositHarvest = () =>
+                                {
+                                    if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1))
+                                        ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1);
+                                };
+
+                                ConveyorAnimator.AnimateTransfer(itemId, 1,
+                                    new Vector2Int(xPos, yPos),
+                                    new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest);
+
                                 Plugin.Log.LogInfo("Autom8er: Harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                             }
                         }
@@ -362,9 +418,23 @@ namespace Autom8er
                             int itemId = Inventory.Instance.getInvItemId(dropItem);
                             if (itemId != -1)
                             {
-                                if (HarvestHelper.TryDepositHarvestToChest(targetChest, inside, itemId, 1))
+                                int slotCheck = ConveyorHelper.FindSlotForItem(targetChest, itemId);
+                                if (slotCheck != -1)
                                 {
                                     harvestedAny = true;
+                                    int capturedItemId = itemId;
+                                    Chest capturedChest = targetChest;
+                                    HouseDetails capturedInside = inside;
+                                    System.Action depositHarvest = () =>
+                                    {
+                                        if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1))
+                                            ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1);
+                                    };
+
+                                    ConveyorAnimator.AnimateTransfer(itemId, 1,
+                                        new Vector2Int(xPos, yPos),
+                                        new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest);
+
                                     Plugin.Log.LogInfo("Autom8er: Harvest (loot) -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                                 }
                             }
@@ -379,6 +449,16 @@ namespace Autom8er
             }
 
             return true; // Let original run
+        }
+    }
+
+    // Clear conveyor animations before saving so no items are lost in transit
+    [HarmonyPatch(typeof(SaveLoad), "SaveGame")]
+    public static class SaveGameAnimationClearPatch
+    {
+        static void Prefix()
+        {
+            ConveyorAnimator.ClearAllAnimations();
         }
     }
 
@@ -853,6 +933,10 @@ namespace Autom8er
                     if (!IsMachineEmpty(machineX, machineY, inside))
                         continue;
 
+                    // Skip machines with a conveyor item in transit
+                    if (ConveyorAnimator.IsTargetReserved(machineX, machineY))
+                        continue;
+
                     if (!item.itemChange.checkIfCanBeDepositedServer(tileObjectId))
                         continue;
 
@@ -1008,6 +1092,10 @@ namespace Autom8er
                     if (!IsMachineEmpty(machineX, machineY, inside))
                         continue;
 
+                    // Skip machines with an item already in transit
+                    if (Plugin.AnimationEnabled && ConveyorAnimator.IsTargetReserved(machineX, machineY))
+                        continue;
+
                     // Try to feed this machine from the chest
                     for (int slot = 0; slot < sourceChest.itemIds.Length; slot++)
                     {
@@ -1049,25 +1137,13 @@ namespace Autom8er
                                 continue;
                         }
 
-                        if (inside != null)
-                        {
-                            NetworkMapSharer.Instance.RpcDepositItemIntoChangerInside(itemId, machineX, machineY, inside.xPos, inside.yPos);
-                        }
-                        else
-                        {
-                            NetworkMapSharer.Instance.RpcDepositItemIntoChanger(itemId, machineX, machineY);
-                        }
-                        NetworkMapSharer.Instance.startTileTimerOnServer(itemId, machineX, machineY, inside);
-
-                        // Update chest slot
+                        // Remove item from chest immediately (keeps inventory counts in sync)
                         if (isFuelItem)
                         {
-                            // Fuel items: always clear the slot
                             ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, -1, 0, inside);
                         }
                         else
                         {
-                            // Regular items: subtract amountNeeded from stack
                             int remaining = stack - amountNeeded;
                             if (remaining <= 0)
                             {
@@ -1077,6 +1153,67 @@ namespace Autom8er
                             {
                                 ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, itemId, remaining, inside);
                             }
+                        }
+
+                        if (Plugin.AnimationEnabled)
+                        {
+                            // Animated: reserve machine, find path, animate, deposit on arrival
+                            ConveyorAnimator.ReserveTarget(machineX, machineY);
+
+                            Vector2Int chestPos = new Vector2Int(sourceChest.xPos, sourceChest.yPos);
+                            Vector2Int machPos = new Vector2Int(machineX, machineY);
+                            List<Vector2Int> path = ConveyorPathfinder.FindPath(chestPos, machPos, inside);
+
+                            // Capture locals for callback closure
+                            int capturedItemId = itemId;
+                            int capturedMachineX = machineX;
+                            int capturedMachineY = machineY;
+                            HouseDetails capturedInside = inside;
+
+                            System.Action onArrival = () =>
+                            {
+                                // Check machine is still empty on arrival
+                                if (IsMachineEmpty(capturedMachineX, capturedMachineY, capturedInside))
+                                {
+                                    if (capturedInside != null)
+                                    {
+                                        NetworkMapSharer.Instance.RpcDepositItemIntoChangerInside(capturedItemId, capturedMachineX, capturedMachineY, capturedInside.xPos, capturedInside.yPos);
+                                    }
+                                    else
+                                    {
+                                        NetworkMapSharer.Instance.RpcDepositItemIntoChanger(capturedItemId, capturedMachineX, capturedMachineY);
+                                    }
+                                    NetworkMapSharer.Instance.startTileTimerOnServer(capturedItemId, capturedMachineX, capturedMachineY, capturedInside);
+                                }
+                                else
+                                {
+                                    // Machine got occupied while item was in transit — return to any reachable chest
+                                    if (FallbackDepositToAnyChest(capturedMachineX, capturedMachineY, capturedInside, capturedItemId, 1))
+                                    {
+                                        Plugin.Log.LogInfo("Autom8er: Machine occupied on arrival — returned item to chest");
+                                    }
+                                    else
+                                    {
+                                        Plugin.Log.LogWarning("Autom8er: Machine occupied on arrival — no chest available, item lost!");
+                                    }
+                                }
+                                ConveyorAnimator.UnreserveTarget(capturedMachineX, capturedMachineY);
+                            };
+
+                            ConveyorAnimator.StartAnimation(itemId, isFuelItem ? stack : amountNeeded, path, onArrival);
+                        }
+                        else
+                        {
+                            // Instant deposit (original behavior)
+                            if (inside != null)
+                            {
+                                NetworkMapSharer.Instance.RpcDepositItemIntoChangerInside(itemId, machineX, machineY, inside.xPos, inside.yPos);
+                            }
+                            else
+                            {
+                                NetworkMapSharer.Instance.RpcDepositItemIntoChanger(itemId, machineX, machineY);
+                            }
+                            NetworkMapSharer.Instance.startTileTimerOnServer(itemId, machineX, machineY, inside);
                         }
 
                         Plugin.Log.LogInfo("Autom8er: Conveyor input -> Machine: " + (isFuelItem ? "1" : amountNeeded.ToString()) + "x " + item.itemName);
@@ -1229,8 +1366,152 @@ namespace Autom8er
                     if (slotIndex == -1)
                         continue;
 
-                    bool isStackable = Inventory.Instance.allItems[itemId].checkIfStackable();
+                    if (Plugin.AnimationEnabled)
+                    {
+                        // Animated: find path and start visual animation, deposit on arrival
+                        Vector2Int machinePos = new Vector2Int(machineX, machineY);
+                        Vector2Int chestPos = new Vector2Int(chest.xPos, chest.yPos);
+                        List<Vector2Int> path = ConveyorPathfinder.FindPath(machinePos, chestPos, inside);
 
+                        // Capture locals for callback closure
+                        int capturedItemId = itemId;
+                        int capturedStack = stackAmount;
+                        int capturedChestX = chest.xPos;
+                        int capturedChestY = chest.yPos;
+                        HouseDetails capturedInside = inside;
+                        Chest capturedChest = chest;
+
+                        System.Action onArrival = () =>
+                        {
+                            // Re-find a valid slot on arrival (chest contents may have changed)
+                            int arrivalSlot = FindSlotForItem(capturedChest, capturedItemId);
+                            if (arrivalSlot == -1)
+                            {
+                                // Chest is full — try any other reachable chest on the network
+                                if (FallbackDepositToAnyChest(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack))
+                                {
+                                    Plugin.Log.LogInfo("Autom8er: Target chest full on arrival — deposited to another chest");
+                                }
+                                else
+                                {
+                                    Plugin.Log.LogWarning("Autom8er: Target chest full on arrival — no chest available, item lost!");
+                                }
+                                return;
+                            }
+
+                            bool stackable = Inventory.Instance.allItems[capturedItemId].checkIfStackable();
+                            if (stackable && capturedChest.itemIds[arrivalSlot] == capturedItemId)
+                            {
+                                ContainerManager.manage.changeSlotInChest(
+                                    capturedChestX, capturedChestY, arrivalSlot,
+                                    capturedItemId, capturedChest.itemStacks[arrivalSlot] + capturedStack, capturedInside);
+                            }
+                            else
+                            {
+                                ContainerManager.manage.changeSlotInChest(
+                                    capturedChestX, capturedChestY, arrivalSlot,
+                                    capturedItemId, capturedStack, capturedInside);
+                            }
+
+                            if (IsAutoSorter(capturedChest))
+                                QueueAutoSorterUpdate(capturedChest);
+                        };
+
+                        ConveyorAnimator.StartAnimation(itemId, stackAmount, path, onArrival);
+                    }
+                    else
+                    {
+                        // Instant deposit (original behavior)
+                        bool isStackable = Inventory.Instance.allItems[itemId].checkIfStackable();
+
+                        if (isStackable && chest.itemIds[slotIndex] == itemId)
+                        {
+                            ContainerManager.manage.changeSlotInChest(
+                                chest.xPos, chest.yPos, slotIndex,
+                                itemId, chest.itemStacks[slotIndex] + stackAmount, inside);
+                        }
+                        else
+                        {
+                            ContainerManager.manage.changeSlotInChest(
+                                chest.xPos, chest.yPos, slotIndex,
+                                itemId, stackAmount, inside);
+                        }
+
+                        if (IsAutoSorter(chest))
+                            QueueAutoSorterUpdate(chest);
+                    }
+
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// Fallback: BFS from a tile position to find ANY reachable chest and deposit instantly.
+        /// Used by animation callbacks when the intended destination is unavailable on arrival.
+        public static bool FallbackDepositToAnyChest(int originX, int originY, HouseDetails inside, int itemId, int stackAmount)
+        {
+            // First try adjacent chests
+            if (TryDepositToAdjacentChest(originX, originY, inside, itemId, stackAmount))
+                return true;
+
+            // Then try chests on the conveyor network (instant, no animation)
+            if (Plugin.ConveyorTileType == -1)
+                return false;
+
+            HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
+            Queue<Vector2Int> toExplore = new Queue<Vector2Int>();
+
+            for (int i = 0; i < 4; i++)
+            {
+                int checkX = originX + dx[i];
+                int checkY = originY + dy[i];
+                if (checkX < 0 || checkY < 0) continue;
+                if (IsConveyorTile(checkX, checkY, inside))
+                {
+                    Vector2Int pos = new Vector2Int(checkX, checkY);
+                    if (pathNetwork.Add(pos))
+                        toExplore.Enqueue(pos);
+                }
+            }
+
+            int maxPathTiles = 500;
+            while (toExplore.Count > 0 && pathNetwork.Count < maxPathTiles)
+            {
+                Vector2Int current = toExplore.Dequeue();
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = current.x + dx[i];
+                    int ny = current.y + dy[i];
+                    if (nx < 0 || ny < 0) continue;
+                    Vector2Int nextPos = new Vector2Int(nx, ny);
+                    if (pathNetwork.Contains(nextPos)) continue;
+                    if (IsConveyorTile(nx, ny, inside))
+                    {
+                        pathNetwork.Add(nextPos);
+                        toExplore.Enqueue(nextPos);
+                    }
+                }
+            }
+
+            foreach (Vector2Int pathTile in pathNetwork)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    int checkX = pathTile.x + dx[i];
+                    int checkY = pathTile.y + dy[i];
+                    if (checkX < 0 || checkY < 0) continue;
+                    if (pathNetwork.Contains(new Vector2Int(checkX, checkY))) continue;
+
+                    Chest chest = FindChestAt(checkX, checkY, inside);
+                    if (chest == null) continue;
+                    if (IsSpecialContainer(checkX, checkY, inside)) continue;
+
+                    int slotIndex = FindSlotForItem(chest, itemId);
+                    if (slotIndex == -1) continue;
+
+                    bool isStackable = Inventory.Instance.allItems[itemId].checkIfStackable();
                     if (isStackable && chest.itemIds[slotIndex] == itemId)
                     {
                         ContainerManager.manage.changeSlotInChest(
@@ -1454,6 +1735,415 @@ namespace Autom8er
         }
     }
 
+    public static class ConveyorPathfinder
+    {
+        private static readonly int[] dx = { -1, 0, 1, 0 };
+        private static readonly int[] dy = { 0, -1, 0, 1 };
+
+        /// Checks if tile (x,y) is part of a multi-tile object whose root is rootPos.
+        /// Returns true for both the root tile itself and any extension tile that resolves to rootPos.
+        private static bool IsPartOfObject(int x, int y, Vector2Int rootPos, HouseDetails inside)
+        {
+            if (x == rootPos.x && y == rootPos.y)
+                return true;
+
+            int[,] tileMap = inside != null ? inside.houseMapOnTile : WorldManager.Instance.onTileMap;
+            int mapW = tileMap.GetLength(0);
+            int mapH = tileMap.GetLength(1);
+            if (x < 0 || y < 0 || x >= mapW || y >= mapH)
+                return false;
+
+            if (tileMap[x, y] < -1)
+            {
+                Vector2 resolved = WorldManager.Instance.findMultiTileObjectPos(x, y, inside);
+                return (int)resolved.x == rootPos.x && (int)resolved.y == rootPos.y;
+            }
+
+            return false;
+        }
+
+        /// BFS with parent tracking to find ordered tile path between two positions.
+        /// Start and end are root tile positions (machine or chest).
+        /// Handles multi-tile objects (silos 2x2, fish ponds 5x5) by checking all
+        /// tiles of the object, not just the root.
+        public static List<Vector2Int> FindPath(Vector2Int start, Vector2Int end, HouseDetails inside)
+        {
+            Dictionary<Vector2Int, Vector2Int> cameFrom = new Dictionary<Vector2Int, Vector2Int>();
+            Queue<Vector2Int> queue = new Queue<Vector2Int>();
+
+            int[,] tileMap = inside != null ? inside.houseMapOnTile : WorldManager.Instance.onTileMap;
+            int mapW = tileMap.GetLength(0);
+            int mapH = tileMap.GetLength(1);
+
+            // Seed BFS with conveyor tiles adjacent to any tile of the start object.
+            // Scan a radius around start to find all tiles of the multi-tile object.
+            int scanRadius = 5; // Covers fish ponds (5x5)
+            int minX = Mathf.Max(0, start.x - scanRadius);
+            int maxX = Mathf.Min(mapW - 1, start.x + scanRadius);
+            int minY = Mathf.Max(0, start.y - scanRadius);
+            int maxY = Mathf.Min(mapH - 1, start.y + scanRadius);
+
+            for (int sx = minX; sx <= maxX; sx++)
+            {
+                for (int sy = minY; sy <= maxY; sy++)
+                {
+                    if (!IsPartOfObject(sx, sy, start, inside))
+                        continue;
+
+                    // Check 4 neighbors of this object tile for conveyor tiles
+                    for (int i = 0; i < 4; i++)
+                    {
+                        int nx = sx + dx[i];
+                        int ny = sy + dy[i];
+                        if (nx < 0 || ny < 0 || nx >= mapW || ny >= mapH)
+                            continue;
+
+                        Vector2Int neighbor = new Vector2Int(nx, ny);
+                        if (ConveyorHelper.IsConveyorTile(nx, ny, inside) && !cameFrom.ContainsKey(neighbor))
+                        {
+                            cameFrom[neighbor] = start;
+                            queue.Enqueue(neighbor);
+                        }
+                    }
+                }
+            }
+
+            Vector2Int effectiveEnd = end;
+            bool foundEnd = false;
+            int maxTiles = 500;
+            int visited = 0;
+
+            while (queue.Count > 0 && visited < maxTiles)
+            {
+                Vector2Int current = queue.Dequeue();
+                visited++;
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = current.x + dx[i];
+                    int ny = current.y + dy[i];
+                    if (nx < 0 || ny < 0 || nx >= mapW || ny >= mapH)
+                        continue;
+
+                    Vector2Int neighbor = new Vector2Int(nx, ny);
+
+                    // Check if neighbor is any tile of the destination object
+                    if (IsPartOfObject(nx, ny, end, inside))
+                    {
+                        effectiveEnd = neighbor;
+                        cameFrom[effectiveEnd] = current;
+                        foundEnd = true;
+                        break;
+                    }
+
+                    if (cameFrom.ContainsKey(neighbor))
+                        continue;
+
+                    if (ConveyorHelper.IsConveyorTile(nx, ny, inside))
+                    {
+                        cameFrom[neighbor] = current;
+                        queue.Enqueue(neighbor);
+                    }
+                }
+
+                if (foundEnd)
+                    break;
+            }
+
+            // Phase 2: If destination not found at distance 1, check distance 2.
+            // This handles targets like outer-row crab pots that are 2 tiles from the conveyor.
+            // The animation ends at the intermediate tile (between conveyor and destination).
+            if (!foundEnd)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    int adjX = end.x + dx[i];
+                    int adjY = end.y + dy[i];
+                    if (adjX < 0 || adjY < 0 || adjX >= mapW || adjY >= mapH)
+                        continue;
+
+                    Vector2Int adjTile = new Vector2Int(adjX, adjY);
+
+                    // Check if this intermediate tile is adjacent to a visited conveyor tile
+                    for (int j = 0; j < 4; j++)
+                    {
+                        int convX = adjX + dx[j];
+                        int convY = adjY + dy[j];
+                        if (convX < 0 || convY < 0 || convX >= mapW || convY >= mapH)
+                            continue;
+
+                        Vector2Int convTile = new Vector2Int(convX, convY);
+                        if (cameFrom.ContainsKey(convTile) && !(convTile.x == start.x && convTile.y == start.y))
+                        {
+                            effectiveEnd = adjTile;
+                            cameFrom[effectiveEnd] = convTile;
+                            foundEnd = true;
+                            break;
+                        }
+                    }
+                    if (foundEnd) break;
+                }
+            }
+
+            if (!foundEnd)
+                return null;
+
+            // Backtrack from effectiveEnd to start
+            List<Vector2Int> path = new List<Vector2Int>();
+            Vector2Int step = effectiveEnd;
+            while (step.x != start.x || step.y != start.y)
+            {
+                path.Add(step);
+                step = cameFrom[step];
+            }
+            path.Add(start);
+            path.Reverse();
+
+            return path;
+        }
+    }
+
+    public static class ConveyorAnimator
+    {
+        private static List<ConveyorAnimation> activeAnimations = new List<ConveyorAnimation>();
+        private static HashSet<long> reservedTargets = new HashSet<long>();
+
+        private class ConveyorAnimation
+        {
+            public GameObject visual;
+            public List<Vector2Int> path;
+            public int currentSegment;
+            public float segmentProgress;
+            public System.Action onArrival;
+            public int itemId;
+            public float startDelay; // Seconds to wait before animation begins (visual hidden until then)
+        }
+
+        private static long PosKey(int x, int y)
+        {
+            return ((long)x << 32) | (uint)y;
+        }
+
+        public static void ReserveTarget(int x, int y)
+        {
+            reservedTargets.Add(PosKey(x, y));
+        }
+
+        public static void UnreserveTarget(int x, int y)
+        {
+            reservedTargets.Remove(PosKey(x, y));
+        }
+
+        public static bool IsTargetReserved(int x, int y)
+        {
+            return reservedTargets.Contains(PosKey(x, y));
+        }
+
+        public static Vector3 TileToWorld(int tileX, int tileY)
+        {
+            // Game places tile objects at (x*2, height, y*2) — no centering offset
+            float worldX = tileX * 2f;
+            float worldY = 0.5f;
+            if (WorldManager.Instance != null &&
+                tileX >= 0 && tileX < WorldManager.Instance.heightMap.GetLength(0) &&
+                tileY >= 0 && tileY < WorldManager.Instance.heightMap.GetLength(1))
+            {
+                worldY = WorldManager.Instance.heightMap[tileX, tileY] + 0.5f;
+            }
+            float worldZ = tileY * 2f;
+            return new Vector3(worldX, worldY, worldZ);
+        }
+
+        // How far into the final (destination) tile the item travels before disappearing.
+        // 0.1 = 10% into the tile — looks like it enters the machine/chest just before vanishing.
+        private const float FINAL_TILE_FRACTION = 0.1f;
+
+        public static void StartAnimation(int itemId, int stackAmount, List<Vector2Int> path, System.Action onArrival, float delay = 0f)
+        {
+            if (path == null || path.Count < 2)
+            {
+                if (onArrival != null)
+                    onArrival();
+                return;
+            }
+
+            GameObject visual = null;
+            try
+            {
+                InventoryItem invItem = Inventory.Instance.allItems[itemId];
+                if (invItem != null && invItem.itemPrefab != null)
+                {
+                    visual = GameObject.Instantiate(invItem.itemPrefab);
+                    visual.transform.position = TileToWorld(path[0].x, path[0].y);
+                    visual.transform.localScale = Vector3.one * 0.75f;
+
+                    Rigidbody rb = visual.GetComponent<Rigidbody>();
+                    if (rb != null)
+                    {
+                        rb.isKinematic = true;
+                        rb.detectCollisions = false;
+                    }
+                    Collider col = visual.GetComponent<Collider>();
+                    if (col != null)
+                        col.enabled = false;
+
+                    DroppedItem droppedItem = visual.GetComponent<DroppedItem>();
+                    if (droppedItem != null)
+                        GameObject.Destroy(droppedItem);
+                    DroppedItemBounce bounce = visual.GetComponent<DroppedItemBounce>();
+                    if (bounce != null)
+                        GameObject.Destroy(bounce);
+
+                    SetItemTexture setTex = visual.GetComponent<SetItemTexture>();
+                    if (setTex != null)
+                        setTex.setTexture(invItem);
+
+                    // Hide visual until delay elapses
+                    if (delay > 0f)
+                        visual.SetActive(false);
+                }
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Autom8er: Failed to create animation visual for item " + itemId + ": " + e.Message);
+            }
+
+            if (visual == null)
+            {
+                if (onArrival != null)
+                    onArrival();
+                return;
+            }
+
+            ConveyorAnimation anim = new ConveyorAnimation
+            {
+                visual = visual,
+                path = path,
+                currentSegment = 0,
+                segmentProgress = 0f,
+                onArrival = onArrival,
+                itemId = itemId,
+                startDelay = delay
+            };
+
+            activeAnimations.Add(anim);
+        }
+
+        public static void UpdateAnimations()
+        {
+            if (activeAnimations.Count == 0)
+                return;
+
+            float speed = Plugin.AnimationSpeed;
+
+            for (int i = activeAnimations.Count - 1; i >= 0; i--)
+            {
+                ConveyorAnimation anim = activeAnimations[i];
+
+                if (anim.visual == null)
+                {
+                    // Visual was destroyed externally, execute callback
+                    if (anim.onArrival != null)
+                    {
+                        try { anim.onArrival(); }
+                        catch (System.Exception e) { Plugin.Log.LogWarning("Autom8er: Animation callback error: " + e.Message); }
+                    }
+                    activeAnimations.RemoveAt(i);
+                    continue;
+                }
+
+                // Handle start delay — visual hidden until delay elapses
+                if (anim.startDelay > 0f)
+                {
+                    anim.startDelay -= Time.deltaTime;
+                    if (anim.visual.activeSelf)
+                        anim.visual.SetActive(false);
+                    continue;
+                }
+                else if (!anim.visual.activeSelf)
+                {
+                    anim.visual.SetActive(true);
+                }
+
+                anim.segmentProgress += Time.deltaTime * speed;
+
+                while (anim.segmentProgress >= 1f && anim.currentSegment < anim.path.Count - 2)
+                {
+                    anim.segmentProgress -= 1f;
+                    anim.currentSegment++;
+                }
+
+                // On the final segment, only travel FINAL_TILE_FRACTION into the destination tile
+                bool isLastSegment = (anim.currentSegment >= anim.path.Count - 2);
+                float arrivalThreshold = isLastSegment ? FINAL_TILE_FRACTION : 1f;
+
+                if (isLastSegment && anim.segmentProgress >= arrivalThreshold)
+                {
+                    // Arrived at destination
+                    if (anim.onArrival != null)
+                    {
+                        try { anim.onArrival(); }
+                        catch (System.Exception e) { Plugin.Log.LogWarning("Autom8er: Animation callback error: " + e.Message); }
+                    }
+                    GameObject.Destroy(anim.visual);
+                    activeAnimations.RemoveAt(i);
+                    continue;
+                }
+
+                // Lerp between current segment endpoints
+                Vector2Int from = anim.path[anim.currentSegment];
+                Vector2Int to = anim.path[anim.currentSegment + 1];
+                Vector3 fromPos = TileToWorld(from.x, from.y);
+                Vector3 toPos = TileToWorld(to.x, to.y);
+                float t = Mathf.Clamp01(anim.segmentProgress);
+                anim.visual.transform.position = Vector3.Lerp(fromPos, toPos, t);
+            }
+        }
+
+        public static void ClearAllAnimations()
+        {
+            for (int i = activeAnimations.Count - 1; i >= 0; i--)
+            {
+                ConveyorAnimation anim = activeAnimations[i];
+                if (anim.onArrival != null)
+                {
+                    try { anim.onArrival(); }
+                    catch (System.Exception e) { Plugin.Log.LogWarning("Autom8er: ClearAll callback error: " + e.Message); }
+                }
+                if (anim.visual != null)
+                    GameObject.Destroy(anim.visual);
+            }
+            activeAnimations.Clear();
+            reservedTargets.Clear();
+        }
+
+        public static bool HasActiveAnimations()
+        {
+            return activeAnimations.Count > 0;
+        }
+
+        /// General-purpose animated transfer. If animation enabled and a path exists,
+        /// items visually slide along the conveyor and the deposit callback fires on arrival.
+        /// Otherwise the deposit callback fires immediately (instant transfer).
+        public static void AnimateTransfer(int itemId, int amount, Vector2Int source, Vector2Int dest, HouseDetails inside, System.Action depositCallback)
+        {
+            if (!Plugin.AnimationEnabled)
+            {
+                depositCallback();
+                return;
+            }
+
+            List<Vector2Int> path = ConveyorPathfinder.FindPath(source, dest, inside);
+            if (path == null || path.Count < 2)
+            {
+                depositCallback();
+                return;
+            }
+
+            StartAnimation(itemId, amount, path, depositCallback);
+        }
+    }
+
     public static class CrabPotHelper
     {
         private static readonly int[] dx = { -1, 0, 1, 0 };
@@ -1590,6 +2280,10 @@ namespace Autom8er
             if (currentStatus >= growth.maxStageToReachByPlacing)
                 return false; // Already baited
 
+            // Skip if bait is already in transit via animation
+            if (ConveyorAnimator.IsTargetReserved(checkX, checkY))
+                return false;
+
             // Try to find valid bait in chest
             return TryLoadBaitFromChest(sourceChest, checkX, checkY, growth);
         }
@@ -1630,12 +2324,7 @@ namespace Autom8er
                 if (stack < minRequired)
                     continue;
 
-                // Load bait into crab pot
-                int newStatus = WorldManager.Instance.onTileStatusMap[crabPotX, crabPotY] + 1;
-                WorldManager.Instance.onTileStatusMap[crabPotX, crabPotY] = newStatus;
-                NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, crabPotX, crabPotY);
-
-                // Remove bait from chest
+                // Remove bait from chest immediately
                 int remaining = stack - 1;
                 if (remaining <= 0)
                 {
@@ -1645,6 +2334,24 @@ namespace Autom8er
                 {
                     ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, itemId, remaining, null);
                 }
+
+                // Reserve crab pot so next scan doesn't send duplicate bait
+                ConveyorAnimator.ReserveTarget(crabPotX, crabPotY);
+
+                // Animate the bait traveling to the crab pot, deposit on arrival
+                int capturedPotX = crabPotX;
+                int capturedPotY = crabPotY;
+                System.Action depositBait = () =>
+                {
+                    int newStatus = WorldManager.Instance.onTileStatusMap[capturedPotX, capturedPotY] + 1;
+                    WorldManager.Instance.onTileStatusMap[capturedPotX, capturedPotY] = newStatus;
+                    NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedPotX, capturedPotY);
+                    ConveyorAnimator.UnreserveTarget(capturedPotX, capturedPotY);
+                };
+
+                ConveyorAnimator.AnimateTransfer(itemId, 1,
+                    new Vector2Int(chest.xPos, chest.yPos),
+                    new Vector2Int(crabPotX, crabPotY), null, depositBait);
 
                 Plugin.Log.LogInfo("Autom8er: Loaded bait into crab pot at " + crabPotX + "," + crabPotY + ": " + item.itemName);
                 return true;
@@ -1785,6 +2492,10 @@ namespace Autom8er
             if (currentStatus >= growth.maxStageToReachByPlacing)
                 return false; // Already loaded
 
+            // Skip if item is already in transit via animation
+            if (ConveyorAnimator.IsTargetReserved(checkX, checkY))
+                return false;
+
             return TryLoadFromChest(sourceChest, checkX, checkY, inside, growth);
         }
 
@@ -1820,22 +2531,7 @@ namespace Autom8er
                 if (stack < minRequired)
                     continue;
 
-                // Load item into growth stage object
-                int newStatus = (inside != null
-                    ? inside.houseMapOnTileStatus[targetX, targetY]
-                    : WorldManager.Instance.onTileStatusMap[targetX, targetY]) + 1;
-
-                if (inside != null)
-                {
-                    inside.houseMapOnTileStatus[targetX, targetY] = newStatus;
-                }
-                else
-                {
-                    WorldManager.Instance.onTileStatusMap[targetX, targetY] = newStatus;
-                }
-                NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, targetX, targetY);
-
-                // Remove item from chest
+                // Remove item from chest immediately
                 int remaining = stack - 1;
                 if (remaining <= 0)
                 {
@@ -1845,6 +2541,35 @@ namespace Autom8er
                 {
                     ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, itemId, remaining, null);
                 }
+
+                // Reserve target to prevent duplicate feeding during animation
+                ConveyorAnimator.ReserveTarget(targetX, targetY);
+
+                // Animate item traveling to growth stage, deposit on arrival
+                int capturedTargetX = targetX;
+                int capturedTargetY = targetY;
+                HouseDetails capturedInside = inside;
+                System.Action depositItem = () =>
+                {
+                    int newStatus = (capturedInside != null
+                        ? capturedInside.houseMapOnTileStatus[capturedTargetX, capturedTargetY]
+                        : WorldManager.Instance.onTileStatusMap[capturedTargetX, capturedTargetY]) + 1;
+
+                    if (capturedInside != null)
+                    {
+                        capturedInside.houseMapOnTileStatus[capturedTargetX, capturedTargetY] = newStatus;
+                    }
+                    else
+                    {
+                        WorldManager.Instance.onTileStatusMap[capturedTargetX, capturedTargetY] = newStatus;
+                    }
+                    NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedTargetX, capturedTargetY);
+                    ConveyorAnimator.UnreserveTarget(capturedTargetX, capturedTargetY);
+                };
+
+                ConveyorAnimator.AnimateTransfer(itemId, 1,
+                    new Vector2Int(chest.xPos, chest.yPos),
+                    new Vector2Int(targetX, targetY), inside, depositItem);
 
                 Plugin.Log.LogInfo("Autom8er: Loaded " + item.itemName + " into growth stage object at " + targetX + "," + targetY);
                 return true;
@@ -1998,6 +2723,10 @@ namespace Autom8er
             if (currentStatus >= 200)
                 return false; // Silo is full
 
+            // Skip if feed is already in transit via animation
+            if (ConveyorAnimator.IsTargetReserved(siloX, siloY))
+                return false;
+
             // Silos only accept Animal Food (item ID 344)
             // The ItemSign component is on the world instance, not the prefab, so we hardcode this
             const int ANIMAL_FOOD_ITEM_ID = 344;
@@ -2034,12 +2763,7 @@ namespace Autom8er
                 if (toTransfer <= 0)
                     continue;
 
-                // Update silo status
-                int newStatus = currentStatus + toTransfer;
-                WorldManager.Instance.onTileStatusMap[siloX, siloY] = newStatus;
-                NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, siloX, siloY);
-
-                // Remove feed from chest
+                // Remove feed from chest immediately
                 int remaining = stack - toTransfer;
                 if (remaining <= 0)
                 {
@@ -2048,6 +2772,48 @@ namespace Autom8er
                 else
                 {
                     ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, itemId, remaining, null);
+                }
+
+                // Reserve silo so next scan doesn't send duplicate feed
+                ConveyorAnimator.ReserveTarget(siloX, siloY);
+
+                // Show half as many bags, each carrying double.
+                // 5% of 200 = 10 items → 5 bags of 2 each.
+                int numBags = Mathf.Max(1, toTransfer / 2);
+                int itemsPerBag = toTransfer / numBags;
+                int remainder = toTransfer - (itemsPerBag * numBags);
+
+                Vector2Int source = new Vector2Int(chest.xPos, chest.yPos);
+                Vector2Int dest = new Vector2Int(siloX, siloY);
+                List<Vector2Int> path = ConveyorPathfinder.FindPath(source, dest, null);
+                float staggerInterval = 0.5f / Plugin.AnimationSpeed;
+
+                for (int b = 0; b < numBags; b++)
+                {
+                    int capturedSiloX = siloX;
+                    int capturedSiloY = siloY;
+                    bool isLastBag = (b == numBags - 1);
+                    // Last bag picks up any remainder from integer division
+                    int bagAmount = isLastBag ? itemsPerBag + remainder : itemsPerBag;
+                    int capturedAmount = bagAmount;
+
+                    System.Action depositBag = () =>
+                    {
+                        int newStatus = Mathf.Min(WorldManager.Instance.onTileStatusMap[capturedSiloX, capturedSiloY] + capturedAmount, 200);
+                        WorldManager.Instance.onTileStatusMap[capturedSiloX, capturedSiloY] = newStatus;
+                        NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedSiloX, capturedSiloY);
+                        if (isLastBag)
+                            ConveyorAnimator.UnreserveTarget(capturedSiloX, capturedSiloY);
+                    };
+
+                    if (Plugin.AnimationEnabled && path != null && path.Count >= 2)
+                    {
+                        ConveyorAnimator.StartAnimation(itemId, bagAmount, path, depositBag, b * staggerInterval);
+                    }
+                    else
+                    {
+                        depositBag();
+                    }
                 }
 
                 return true;
@@ -2218,6 +2984,10 @@ namespace Autom8er
             if (pondChest.itemIds[22] != -1)
                 return false;
 
+            // Skip if food is already in transit via animation
+            if (ConveyorAnimator.IsTargetReserved(rootX, rootY))
+                return false;
+
             return TryLoadFoodFromChest(sourceChest, rootX, rootY, isFishPond);
         }
 
@@ -2257,10 +3027,7 @@ namespace Autom8er
                 if (keepOne && Inventory.Instance.allItems[itemId].checkIfStackable() && stack < 2)
                     continue;
 
-                // Load 1 food into slot 22
-                ContainerManager.manage.changeSlotInChest(pondX, pondY, 22, itemId, 1, null);
-
-                // Remove 1 from source chest
+                // Remove 1 from source chest immediately
                 int remaining = stack - 1;
                 if (remaining <= 0)
                 {
@@ -2270,6 +3037,23 @@ namespace Autom8er
                 {
                     ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, itemId, remaining, null);
                 }
+
+                // Reserve pond so next scan doesn't send duplicate food
+                ConveyorAnimator.ReserveTarget(pondX, pondY);
+
+                // Animate food traveling to pond/terrarium, deposit on arrival
+                int capturedPondX = pondX;
+                int capturedPondY = pondY;
+                int capturedItemId = itemId;
+                System.Action depositFood = () =>
+                {
+                    ContainerManager.manage.changeSlotInChest(capturedPondX, capturedPondY, 22, capturedItemId, 1, null);
+                    ConveyorAnimator.UnreserveTarget(capturedPondX, capturedPondY);
+                };
+
+                ConveyorAnimator.AnimateTransfer(itemId, 1,
+                    new Vector2Int(sourceChest.xPos, sourceChest.yPos),
+                    new Vector2Int(pondX, pondY), null, depositFood);
 
                 string typeName = isFishPond ? "fish pond" : "bug terrarium";
                 Plugin.Log.LogInfo("Autom8er: Fed " + typeName + " at " + pondX + "," + pondY + ": " + Inventory.Instance.allItems[itemId].itemName);
@@ -2464,24 +3248,42 @@ namespace Autom8er
                 // If full (5 creatures), extract everything
             }
 
-            // Deposit into the target chest
-            if (HarvestHelper.TryDepositHarvestToChest(targetChest, null, outputId, extractAmount))
-            {
-                // Update the pond's slot 23
-                int remaining = outputStack - extractAmount;
-                if (remaining <= 0)
-                {
-                    ContainerManager.manage.changeSlotInChest(rootX, rootY, 23, -1, 0, null);
-                }
-                else
-                {
-                    ContainerManager.manage.changeSlotInChest(rootX, rootY, 23, outputId, remaining, null);
-                }
+            // Check if chest has room before removing from pond
+            int depositSlot = ConveyorHelper.FindSlotForItem(targetChest, outputId);
+            if (depositSlot == -1)
+                return;
 
-                string typeName = isFishPond ? "fish pond" : "bug terrarium";
-                string itemName = Inventory.Instance.allItems[outputId].itemName;
-                Plugin.Log.LogInfo("Autom8er: Extracted " + extractAmount + "x " + itemName + " from " + typeName + " at " + rootX + "," + rootY);
+            // Remove from pond slot 23 immediately
+            int remaining = outputStack - extractAmount;
+            if (remaining <= 0)
+            {
+                ContainerManager.manage.changeSlotInChest(rootX, rootY, 23, -1, 0, null);
             }
+            else
+            {
+                ContainerManager.manage.changeSlotInChest(rootX, rootY, 23, outputId, remaining, null);
+            }
+
+            // Animate output traveling to chest, deposit on arrival
+            int capturedOutputId = outputId;
+            int capturedExtract = extractAmount;
+            Chest capturedChest = targetChest;
+            System.Action depositOutput = () =>
+            {
+                if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, null, capturedOutputId, capturedExtract))
+                {
+                    // Chest full on arrival — try any reachable chest
+                    ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, null, capturedOutputId, capturedExtract);
+                }
+            };
+
+            ConveyorAnimator.AnimateTransfer(outputId, extractAmount,
+                new Vector2Int(rootX, rootY),
+                new Vector2Int(targetChest.xPos, targetChest.yPos), null, depositOutput);
+
+            string typeName = isFishPond ? "fish pond" : "bug terrarium";
+            string itemName = Inventory.Instance.allItems[outputId].itemName;
+            Plugin.Log.LogInfo("Autom8er: Extracted " + extractAmount + "x " + itemName + " from " + typeName + " at " + rootX + "," + rootY);
         }
     }
 }
