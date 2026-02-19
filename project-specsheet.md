@@ -1,7 +1,7 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
@@ -12,15 +12,16 @@
 1. **Auto Input/Output** - Chests next to machines automatically feed inputs and receive outputs
 2. **White Crates = INPUT ONLY** - White crates/chests feed machines but won't receive outputs
 3. **Conveyor Belt System** - Black Marble Path (configurable) routes items between distant chests and machines
-4. **Silo Auto-Fill** - Silos fill from chests with Animal Food (configurable speed, visual fill effect)
-5. **Crab Pot Automation** - Auto-bait loading + harvest output via chests/conveyors (2-tile radius for water)
-6. **Harvest Machines** - Bee houses, key cutters, worm farms auto-harvest on day change
-7. **Growth Stage Loading** - Incubators and other growth-stage objects accept items from chests/conveyors
-8. **Farm Animal Protection** - Incubators and animal spawners are NEVER auto-harvested
-9. **Fish Pond Automation** - Auto-feed critters from adjacent chests, extract roe on day change (3-tile radius)
-10. **Bug Terrarium Automation** - Auto-feed honey from adjacent chests, extract cocoons on day change (3-tile radius)
-11. **Auto Sorter Integration** - Auto Sorters work as automation I/O chests, exempt from KeepOneItem, fire items on deposit
-12. **Auto Placer Support** - Auto Placers function as standard automation chests
+4. **Conveyor Visual Animations** - Items visually slide along conveyor paths; transfer happens on arrival
+5. **Silo Auto-Fill** - Silos fill from chests with Animal Food (5 staggered bag animations per tick)
+6. **Crab Pot Automation** - Auto-bait loading + harvest output via chests/conveyors (2-tile radius for water)
+7. **Harvest Machines** - Bee houses, key cutters, worm farms auto-harvest on day change
+8. **Growth Stage Loading** - Incubators and other growth-stage objects accept items from chests/conveyors
+9. **Farm Animal Protection** - Incubators and animal spawners are NEVER auto-harvested
+10. **Fish Pond Automation** - Auto-feed critters from adjacent chests, extract roe on day change (3-tile radius)
+11. **Bug Terrarium Automation** - Auto-feed honey from adjacent chests, extract cocoons on day change (3-tile radius)
+12. **Auto Sorter Integration** - Auto Sorters work as automation I/O chests, exempt from KeepOneItem, fire items on deposit
+13. **Auto Placer Support** - Auto Placers function as standard automation chests
 
 ---
 
@@ -67,15 +68,16 @@ if (onTileMap[x, y] < -1)
 
 ## Code Structure
 
-### Plugin.cs Layout (~2470 lines)
+### Plugin.cs Layout (~2800+ lines)
 ```
 Autom8er namespace
 ├── Plugin : BaseUnityPlugin
 │   ├── Config: ConveyorTileItemId, KeepOneItem, ScanInterval, SiloFillSpeed,
-│   │          AutoFeedPonds, HoldOutputForBreeding
+│   │          AutoFeedPonds, HoldOutputForBreeding, AnimationEnabled, AnimationSpeed
 │   ├── Constants: WHITE_CRATE_TILE_ID (417), WHITE_CHEST_TILE_ID (430)
 │   ├── Awake() - Init config, apply Harmony patches
-│   ├── Update() - Scan timer, process chests at ScanInterval
+│   ├── Update() - ConveyorAnimator.UpdateAnimations() + scan timer + ProcessAllChests
+│   ├── OnDestroy() - ConveyorAnimator.ClearAllAnimations() + harmony.UnpatchSelf()
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
 │   └── ProcessAllChests() - Main loop (ORDER MATTERS):
 │       1. FishPondHelper.TryFeedPondsAndTerrariums ← MUST BE FIRST (see Rule 7)
@@ -83,7 +85,7 @@ Autom8er namespace
 │       3. TryFeedMachineViaConveyorPath (furnaces via conveyor)
 │       4. CrabPotHelper.TryLoadBaitIntoCrabPots (2-tile radius)
 │       5. GrowthStageHelper.TryLoadItemsIntoGrowthStages (incubators, etc)
-│       6. SiloHelper.TryLoadFeedIntoSilos (visual fill)
+│       6. SiloHelper.TryLoadFeedIntoSilos (staggered bag animations)
 │
 ├── EjectItemOnCyclePatch [HarmonyPatch]
 │   └── Prefix on ItemDepositAndChanger.ejectItemOnCycle()
@@ -91,6 +93,7 @@ Autom8er namespace
 │       - Priority 1: Direct adjacent chest (TryDepositToAdjacentChest)
 │       - Priority 2: Via conveyor path (TryDepositViaConveyorPath)
 │       - Both trigger QueueAutoSorterUpdate if depositing into Auto Sorter
+│       - Both animated when via conveyor path
 │
 ├── NewDayHarvestPatch [HarmonyPatch]
 │   └── Postfix on WorldManager.refreshAllChunksNewDay()
@@ -98,7 +101,12 @@ Autom8er namespace
 │       - Calls HarvestHelper.ProcessHarvestableMachines()
 │       - Calls FishPondHelper.ProcessPondAndTerrariumOutput()
 │
-├── HarvestHelper (static class) — line ~407
+├── SaveGameAnimationClearPatch [HarmonyPatch]
+│   └── Prefix on SaveLoad.SaveGame()
+│       - Calls ConveyorAnimator.ClearAllAnimations()
+│       - Executes all pending deposit callbacks (no item loss)
+│
+├── HarvestHelper (static class)
 │   ├── ProcessHarvestableMachines() - Entry point on day change
 │   ├── ScanAndHarvestAllChests() - Scan all chests + conveyor networks
 │   ├── ScanConveyorPathForHarvestables() - BFS to find harvestable machines
@@ -108,88 +116,150 @@ Autom8er namespace
 │   │   └── Triggers QueueAutoSorterUpdate if target is Auto Sorter
 │   ├── FindAdjacentChestForHarvest() - Find output chest nearby
 │   └── FindChestViaConveyorPath() - Find chest via conveyor BFS
-│       └── Checks ADJACENT tiles to conveyors for chests (not ON them)
 │
-├── ConveyorHelper (static class) — line ~810
+├── ConveyorHelper (static class)
 │   ├── TryFeedAdjacentMachine() - Direct chest → machine
-│   │   └── KeepOneItem exemption for Auto Sorters
-│   ├── TryFeedMachineViaConveyorPath() - Chest → path → machine
-│   │   └── KeepOneItem exemption for Auto Sorters
-│   ├── TryDepositToAdjacentChest() - Machine → direct chest
-│   │   └── Triggers QueueAutoSorterUpdate if target is Auto Sorter
-│   ├── TryDepositViaConveyorPath() - Machine → path → chest
-│   │   └── Triggers QueueAutoSorterUpdate if target is Auto Sorter
+│   │   └── Checks ConveyorAnimator.IsTargetReserved() to avoid double-feeding
+│   ├── TryFeedMachineViaConveyorPath() - Chest → path → machine (animated)
+│   │   └── ReserveTarget, animate, deposit+UnreserveTarget on arrival
+│   ├── TryDepositToAdjacentChest() - Machine → direct chest (instant)
+│   ├── TryDepositViaConveyorPath() - Machine → path → chest (animated)
+│   │   └── Arrival callback: deposit or FallbackDepositToAnyChest if full
+│   ├── FallbackDepositToAnyChest() - BFS fallback when intended dest unavailable
 │   ├── IsConveyorTile() - Check if tile is conveyor path
 │   ├── IsInputOnlyContainer() - Check for white crate/chest
-│   ├── IsSpecialContainer() - Exclude fish ponds, terrariums, auto placers, mannequins, etc.
-│   │   └── Auto Sorters REMOVED from this list (they participate in automation)
+│   ├── IsSpecialContainer() - Exclude fish ponds, terrariums, auto placers, etc.
 │   ├── FindChestAt() - Get Chest object at position
 │   │   └── Filters out tileObjectItemChanger (gacha machines, etc.)
-│   ├── IsAutoSorter() - Check if chest is Auto Sorter via Chest.IsAutoSorter()
+│   ├── IsAutoSorter() - Check if chest is Auto Sorter
 │   ├── QueueAutoSorterUpdate() - Debounced trigger for Auto Sorter firing
 │   ├── AutoSorterBatchSort() - Coroutine: 1s delay, then fire slots one at a time
 │   ├── FindSlotForItem() - Find slot for stacking or empty slot
 │   └── ChestHasItems() - Check if chest has any items
 │
-├── CrabPotHelper (static class) — line ~1440
+├── ConveyorPathfinder (static class)
+│   ├── IsPartOfObject() - Check if tile belongs to a multi-tile object at root
+│   └── FindPath(start, end, inside) - BFS with parent tracking
+│       - Phase 1: Walk conveyor tiles, check distance-1 neighbors for destination
+│       - Phase 2: If not found, check distance-2 (outer-row crab pots)
+│       - Multi-tile aware: scans radius around start for all object tiles
+│       - Returns ordered List<Vector2Int> path including start and end
+│
+├── ConveyorAnimator (static class)
+│   ├── ConveyorAnimation (inner class)
+│   │   └── Fields: visual, path, currentSegment, segmentProgress, onArrival, itemId, startDelay
+│   ├── FINAL_TILE_FRACTION = 0.1f — item travels 10% into destination tile
+│   ├── TileToWorld(x, y) - Convert tile coords to world position
+│   │   └── new Vector3(x*2, heightMap[x,y]+0.5, y*2) — NO centering offset
+│   ├── StartAnimation(itemId, amount, path, onArrival, delay=0)
+│   │   └── Instantiates itemPrefab, scale 0.75, disables physics/collider
+│   │   └── Removes DroppedItem/DroppedItemBounce, applies SetItemTexture
+│   │   └── Hides visual if delay > 0 (shown when delay elapses)
+│   ├── UpdateAnimations() - Called every frame from Plugin.Update()
+│   │   └── Handles startDelay countdown (visual hidden until ready)
+│   │   └── Lerps position along path segments
+│   │   └── FINAL_TILE_FRACTION on last segment
+│   │   └── Executes onArrival callback when animation completes
+│   ├── AnimateTransfer(itemId, amount, source, dest, inside, callback)
+│   │   └── General-purpose: FindPath + StartAnimation, instant fallback if disabled/no path
+│   ├── ReserveTarget/UnreserveTarget/IsTargetReserved
+│   │   └── HashSet<long> keyed by (x<<32|y), prevents duplicate transfers during animation
+│   ├── ClearAllAnimations() - Executes ALL pending callbacks, destroys visuals, clears reservations
+│   └── HasActiveAnimations() - Check if any animations running
+│
+├── CrabPotHelper (static class)
 │   ├── TryLoadBaitIntoCrabPots() - Entry point (outdoor only)
-│   ├── TryLoadBaitInRadius() - 2-tile radius search (Manhattan distance)
+│   ├── TryLoadBaitInRadius() - 2-tile Manhattan distance search
 │   ├── TryLoadBaitViaConveyorPath() - BFS conveyor + 2-tile radius
-│   ├── TryLoadBaitAtPosition() - Check for crab pot, needs bait
-│   └── TryLoadBaitFromChest() - Match itemsToPlace[], consume from chest
-│       └── KeepOneItem exemption for Auto Sorters
+│   ├── TryLoadBaitAtPosition() - Check for crab pot, needs bait, IsTargetReserved check
+│   └── TryLoadBaitFromChest() - ReserveTarget, animate, deposit+UnreserveTarget on arrival
 │
-├── GrowthStageHelper (static class) — line ~1642
+├── GrowthStageHelper (static class)
 │   ├── TryLoadItemsIntoGrowthStages() - Entry point
-│   ├── TryLoadInRadius() - 1-tile radius (standard adjacency)
+│   ├── TryLoadInRadius() - 1-tile radius
 │   ├── TryLoadViaConveyorPath() - BFS conveyor + 1-tile radius
-│   ├── TryLoadAtPosition() - Check growth stage, needs loading, SKIP crab pots
-│   └── TryLoadFromChest() - Match itemsToPlace[], consume from chest
-│       └── KeepOneItem exemption for Auto Sorters
+│   ├── TryLoadAtPosition() - Check growth stage, SKIP crab pots, IsTargetReserved check
+│   └── TryLoadFromChest() - ReserveTarget, animate, deposit+UnreserveTarget on arrival
 │
-├── SiloHelper (static class) — line ~1840
+├── SiloHelper (static class)
 │   ├── TryLoadFeedIntoSilos() - Entry point (outdoor only)
 │   ├── TryLoadFeedInRadius() - 1-tile radius
 │   ├── TryLoadFeedViaConveyorPath() - BFS conveyor
-│   ├── TryLoadFeedAtPosition() - Multi-tile root resolution, isSilo check
-│   └── TryLoadFeedFromChest() - Hardcoded item 344 (Animal Food), configurable speed
-│       └── KeepOneItem exemption for Auto Sorters
+│   ├── TryLoadFeedAtPosition() - Multi-tile root resolution, isSilo check, IsTargetReserved
+│   └── TryLoadFeedFromChest() - Staggered bag animations:
+│       - toTransfer = SiloFillSpeed (default 10 = 5% of 200)
+│       - numBags = toTransfer/2 (5 visible bags)
+│       - Each bag deposits 2 items on arrival
+│       - Stagger interval = 0.5 tiles / AnimationSpeed
+│       - Only last bag calls UnreserveTarget
 │
-└── FishPondHelper (static class) — line ~2047
+└── FishPondHelper (static class)
     ├── TryFeedPondsAndTerrariums() - Entry point (outdoor only, 3-tile radius)
     ├── TryFeedInRadius() - 3-tile Manhattan distance search
     ├── TryFeedViaConveyorPath() - BFS conveyor + 3-tile radius at each tile
-    ├── TryFeedAtPosition() - Multi-tile root resolution, identify pond/terrarium
-    ├── TryLoadFoodFromChest() - Load critters (pond) or honey (terrarium) into slot 22
-    │   └── KeepOneItem exemption for Auto Sorters
+    ├── TryFeedAtPosition() - Multi-tile root resolution, IsTargetReserved check
+    ├── TryLoadFoodFromChest() - ReserveTarget, animate, deposit+UnreserveTarget
     ├── ProcessPondAndTerrariumOutput() - Day change extraction entry point
     ├── ExtractOutputViaConveyorPath() - BFS conveyor for extraction targets
-    └── TryExtractOutputAtPosition() - Extract from slot 23 with breeding hold logic
+    └── TryExtractOutputAtPosition() - Animate output from pond/terrarium to chest
 ```
 
 ---
 
 ## How Systems Work
 
+### Conveyor Visual Animations (v1.5.0)
+
+All conveyor transfers now show items visually sliding along the path. The system has three layers:
+
+**ConveyorPathfinder** — Finds the tile-by-tile path between source and destination:
+1. BFS from source, walking only conveyor tiles, tracking parent pointers
+2. Multi-tile aware: scans radius 5 around source to find all tiles of multi-tile objects (silos, fish ponds)
+3. Destination check: matches the exact tile OR any extension tile of a multi-tile object
+4. Phase 2 fallback: if destination not found at distance 1, checks distance 2 (outer-row crab pots)
+5. Returns ordered `List<Vector2Int>` from source to destination (or nearest reachable tile)
+
+**ConveyorAnimator** — Manages visual item models sliding along paths:
+1. `StartAnimation()` instantiates the item's 3D prefab at 0.75 scale, disables physics
+2. `UpdateAnimations()` runs every frame — lerps position along path segments at `AnimationSpeed` tiles/sec
+3. `FINAL_TILE_FRACTION` (0.1) — item travels only 10% into the final destination tile before vanishing
+4. `startDelay` field — visual hidden until delay elapses (used for staggered silo bags)
+5. On arrival: executes deposit callback, destroys visual model
+
+**Reservation system** — Prevents duplicate transfers during animation:
+- `ReserveTarget(x,y)` called before animation starts
+- `IsTargetReserved(x,y)` checked before starting new transfers to same target
+- `UnreserveTarget(x,y)` called in deposit callback when animation arrives
+- Used by: machines, crab pots, silos, fish ponds, terrariums, growth stages
+
+**Key constants:**
+- `FINAL_TILE_FRACTION = 0.1f` — 10% into destination tile
+- Item scale: `0.75f` (smaller than dropped items)
+- Tile-to-world: `new Vector3(x*2, heightMap[x,y]+0.5, y*2)` — matches game's `NetworkMapSharer` placement
+
+**When animation is disabled** (`AnimationEnabled = false`):
+- `AnimateTransfer()` fires the deposit callback immediately (same frame)
+- Functionally identical to v1.4.0 behavior
+- Items removed from source, deposited to destination instantly
+
 ### Auto Input (Chest → Machine) — ItemDepositAndChanger machines
 1. `Update()` runs at `ScanInterval` (default 0.3s) on server
 2. Iterates all `ContainerManager.manage.activeChests`
 3. For each chest with items:
    - `FishPondHelper.TryFeedPondsAndTerrariums(chest, inside)` - FIRST (see Rule 7)
-   - `TryFeedAdjacentMachine(chest, inside)` - Check 4 adjacent tiles
+   - `TryFeedAdjacentMachine(chest, inside)` - Check 4 adjacent tiles (respects reservations)
    - If no adjacent machine, `TryFeedMachineViaConveyorPath(chest, inside)` - BFS along conveyor
    - One machine fed per chest per cycle (speed controlled by ScanInterval)
 4. Validates: machine empty, item can be deposited, enough quantity
 5. If `KeepOneItem` enabled (and source is NOT Auto Sorter), requires `amountNeeded + 1` items before taking
-6. Calls `NetworkMapSharer.Instance.RpcDepositItemIntoChanger()` to deposit
-7. Calls `NetworkMapSharer.Instance.startTileTimerOnServer()` to start processing
-8. Updates chest slot via `ContainerManager.manage.changeSlotInChest()`
+6. Item removed from chest immediately; machine feed happens on animation arrival
+7. Adjacent transfers (no conveyor) are always instant
 
 ### Auto Output (Machine → Chest)
 1. Harmony Prefix on `ItemDepositAndChanger.ejectItemOnCycle()`
 2. Gets result item ID from `itemChange.getChangerResultId()`
-3. Priority 1: `TryDepositToAdjacentChest()` - Direct adjacent (skips white crates + special containers)
-4. Priority 2: `TryDepositViaConveyorPath()` - BFS along conveyor to find chest
+3. Priority 1: `TryDepositToAdjacentChest()` - Direct adjacent (instant, skips white crates + special containers)
+4. Priority 2: `TryDepositViaConveyorPath()` - BFS along conveyor, animated to chest
 5. If deposited into Auto Sorter, calls `QueueAutoSorterUpdate()` to trigger firing
 6. If deposited, returns `false` to skip original eject (no ground drop)
 7. If no chest found, returns `true` to let item drop normally
@@ -218,10 +288,10 @@ Autom8er namespace
 2. Scans 3-tile Manhattan distance radius around source chest
 3. Also searches via conveyor BFS + 3-tile radius at each conveyor tile
 4. For each found fish pond (multi-tile root resolved):
+   - Checks IsTargetReserved — skips if food already in transit
    - Gets pond chest via `getChestForWindow(rootX, rootY, null)`
    - Checks slot 22 — if empty, searches source chest for items with `underwaterCreature` set
-   - Loads 1 critter into slot 22 via `changeSlotInChest()`
-   - Removes 1 from source chest
+   - ReserveTarget, animate, deposit on arrival + UnreserveTarget
 
 **Extraction (day change, via ProcessPondAndTerrariumOutput):**
 1. Copies `activeChests`, iterates each regular outdoor chest
@@ -231,7 +301,7 @@ Autom8er namespace
    - **5 creatures (full):** Extract ALL roe
    - **< 5 creatures AND HoldOutputForBreeding:** Only extract above 15 roe
    - **HoldOutputForBreeding disabled:** Extract ALL
-4. Deposits via `TryDepositHarvestToChest()`, updates slot 23
+4. Animated transfer from pond to chest; FallbackDepositToAnyChest if dest full on arrival
 
 ### Bug Terrarium Automation
 Same architecture as fish ponds but:
@@ -246,46 +316,50 @@ Same architecture as fish ponds but:
 3. Multi-tile resolution: silos are 2x2, non-root tiles have `onTileMap < -1`
 4. Uses `findMultiTileObjectPos()` to get root tile for status read/write
 5. **Animal Food hardcoded as item 344** — `ItemSign.itemCanPlaceIn` is NOT on the prefab, only on world instances
-6. Fills `SiloFillSpeed` items per tick (default 2, configurable 1-5)
-7. Visual fill updates automatically via `ShowObjectOnStatusChange.toScale` scaling Y by status/200
-8. Max capacity: 200 (stored in `onTileStatusMap`)
+6. Fills `SiloFillSpeed` items per tick (default 10 = 5% of 200 capacity)
+7. **Staggered bag animations:** `numBags = toTransfer / 2` (5 bags), each depositing 2 items
+   - Bags staggered by `0.5 / AnimationSpeed` seconds apart
+   - Only last bag unreserves the silo
+8. Visual fill updates automatically via `ShowObjectOnStatusChange.toScale` scaling Y by status/200
+9. Max capacity: 200 (stored in `onTileStatusMap`)
 
 ### Crab Pot Automation
 1. **Bait Loading** (continuous, in `ProcessAllChests`):
    - 2-tile Manhattan distance radius (crab pots are in water, 1 tile from shore)
    - Uses `TileObjectGrowthStages.itemsToPlace[]` to match valid bait items dynamically
    - Checks `currentStatus < maxStageToReachByPlacing` to know if bait needed
+   - IsTargetReserved check prevents duplicate feeding during animation
    - Conveyor support: BFS along conveyors, checking 2-tile radius at each conveyor tile
+   - Pathfinder distance-2 support: outer-row pots (2 tiles from conveyor) animate to the intermediate tile
 2. **Harvest Output** (day change, via `NewDayHarvestPatch`):
    - Scans for crab pots at harvestable state
    - 2-tile radius search for output chest
-   - `FindChestViaConveyorPath` checks ADJACENT tiles to conveyors for chests
-   - Fish/critters deposited 1 per slot (non-stackable)
+   - Animated transfer from pot to chest
 
 ### Growth Stage Loading (Incubators, etc.)
 1. Runs every tick in `ProcessAllChests()` after crab pot loading
 2. Handles ANY `TileObjectGrowthStages` with `itemsToPlace[]` EXCEPT crab pots
 3. Crab pots excluded because CrabPotHelper handles them with 2-tile radius
 4. Uses standard 1-tile adjacency + conveyor BFS
-5. Matches items via `growth.itemsToPlace[]` array (dynamic, not hardcoded)
-6. Checks `currentStatus < maxStageToReachByPlacing` to know if loading needed
-7. Works for: Egg Incubators (fertilized eggs), any future growth-stage objects
+5. IsTargetReserved + ReserveTarget/UnreserveTarget for animation safety
+6. Matches items via `growth.itemsToPlace[]` array (dynamic, not hardcoded)
 
 ### Harvest Day Change (Bee Houses, Key Cutters, Worm Farms)
 1. Harmony Postfix on day change event
 2. Scans all chests and their conveyor networks for harvestable machines
 3. **CRITICAL GUARD: `if (growth.spawnsFarmAnimal) return;`** — Never harvests incubators or animal spawners
-4. Only harvests when output chest is available (prevents item loss)
+4. Animated transfer from machine to chest; FallbackDepositToAnyChest if dest full
 5. Resets growth stage via `takeOrAddFromStateOnHarvest`
 
 ### Conveyor Path BFS Algorithm
-1. Start from machine/chest position
+1. Start from machine/chest position (multi-tile: scan all object tiles)
 2. Check adjacent tiles for conveyor tile type
 3. Add matching tiles to queue, track visited in `HashSet<long>`
-4. Limit to 50-100 steps to prevent runaway
+4. Limit to 50-500 steps depending on context
 5. At each conveyor tile, check adjacent positions for targets
-6. For crab pots/fish ponds: extended radius at each conveyor tile
-7. For chests in `FindChestViaConveyorPath`: check ADJACENT to conveyor tiles (not ON them)
+6. Phase 2: if destination not found at distance 1, check distance 2 from all visited conveyors
+7. For crab pots/fish ponds: extended radius at each conveyor tile
+8. For chests in `FindChestViaConveyorPath`: check ADJACENT to conveyor tiles (not ON them)
 
 ### Input-Only Logic
 - `IsInputOnlyContainer()` checks TileObject ID against WHITE_CRATE_TILE_ID (417) and WHITE_CHEST_TILE_ID (430)
@@ -307,9 +381,11 @@ BepInEx/config/topmass.autom8er.cfg
 | `ConveyorTileItemId` | Conveyor | 1747 | Any valid path item ID | Floor tile used as conveyor belt |
 | `ScanInterval` | Performance | 0.3 | 0.1-1.0 | Seconds between automation scans |
 | `KeepOneItem` | Automation | false | true/false | Reserve 1 item in slots as placeholder (Auto Sorters always exempt) |
-| `SiloFillSpeed` | Automation | 2 | 1-5 | Animal Food items loaded per tick |
+| `SiloFillSpeed` | Automation | 10 | 1-20 | Animal Food items loaded per tick (5 bags shown, each carries 2) |
 | `AutoFeedPondsAndTerrariums` | Fish Pond & Terrarium | true | true/false | Auto-feed ponds/terrariums + extract on day change |
 | `HoldOutputForBreeding` | Fish Pond & Terrarium | true | true/false | Hold 15 roe / 10 cocoons when < 5 creatures |
+| `AnimationEnabled` | Conveyor Animation | true | true/false | Show items visually moving along conveyors. Disable for instant transfers |
+| `AnimationSpeed` | Conveyor Animation | 2 | 0.5-10 | Speed of conveyor animations in tiles per second |
 
 ### Runtime Tile Type Caching
 ```csharp
@@ -344,7 +420,7 @@ if (tileObjectId < -1)
 ```
 
 ### 4. Crab Pots Need 2-Tile Radius
-Crab pots are placed in water, 1 tile from shore. Chests and conveyors are on land. Need 2-tile Manhattan distance for detection.
+Crab pots are placed in water, 1 tile from shore. Chests and conveyors are on land. Need 2-tile Manhattan distance for detection. ConveyorPathfinder has Phase 2 fallback for outer-row pots at distance 2 from conveyor.
 
 ### 5. Conveyor Chest Detection: Adjacent, Not On
 `FindChestViaConveyorPath` must check tiles ADJACENT to conveyor tiles for chests, not ON them. Chests sit next to conveyors, not on top of them.
@@ -356,10 +432,19 @@ When iterating `ContainerManager.manage.activeChests`, operations that modify ch
 In `ProcessAllChests()`, fish pond feeding MUST happen before `TryFeedAdjacentMachine()`. Critters (underwater creatures) have `itemChange` set on them, which means the machine-feeding code would try to deposit them into furnaces/grinders. By feeding ponds first, critters get consumed for their intended purpose.
 
 ### 8. Auto Sorters Are Exempt from KeepOneItem
-All 6 KeepOneItem check locations use `!IsAutoSorter(chest)` to exempt Auto Sorters. This is essential because Auto Sorters are intermediary — they need to fully empty to fire items to their final destinations. Regular chests with KeepOneItem keep 1 item per slot so the Auto Sorter always has a target to match against.
+All 6 KeepOneItem check locations use `!IsAutoSorter(chest)` to exempt Auto Sorters. This is essential because Auto Sorters are intermediary — they need to fully empty to fire items to their final destinations.
 
 ### 9. Filter tileObjectItemChanger in FindChestAt
-`FindChestAt()` skips any TileObject that has `tileObjectItemChanger != null`. This prevents ghost chest creation from machines like gacha machines that have `tileObjectChest` but are not legitimate storage containers. See Learnings section for details.
+`FindChestAt()` skips any TileObject that has `tileObjectItemChanger != null`. This prevents ghost chest creation from machines like gacha machines that have `tileObjectChest` but are not legitimate storage containers.
+
+### 10. Tile-to-World Conversion: NO Centering Offset
+Game places tile objects at `new Vector3(x*2, heightMap[x,y], y*2)` — confirmed in `NetworkMapSharer.cs:1561`. Animation uses the same formula plus 0.5 Y offset to float items above ground. Do NOT add +1 centering offset.
+
+### 11. Reserve Targets During Animation
+Every animated transfer MUST: (1) ReserveTarget before animation, (2) UnreserveTarget in deposit callback. Without this, the scan loop sees the target as still needing items and sends duplicates, causing flooding (items flying out everywhere).
+
+### 12. No dropAnItem in Callbacks
+Never use `WorldManager.Instance.dropAnItem()` in animation callbacks — it creates ghost items (visual-only, can't be picked up) when called from Update context. Use `FallbackDepositToAnyChest()` instead, which BFS-searches for any valid chest on the conveyor network.
 
 ---
 
@@ -410,7 +495,7 @@ code/bin/Release/net472/topmass.autom8er.dll
 cp code/bin/Release/net472/topmass.autom8er.dll mod/
 
 # Game plugins
-cp code/bin/Release/net472/topmass.autom8er.dll ~/.steam/steam/steamapps/common/Dinkum/BepInEx/plugins/
+cp code/bin/Release/net472/topmass.autom8er.dll /home/topmass/Steam/steamapps/common/Dinkum/BepInEx/plugins/
 ```
 
 ---
@@ -492,15 +577,22 @@ Inventory.Instance.allItems[id].underwaterCreature  // pond food check (referenc
 ### Silo Not Filling
 1. Silo uses `SprinklerTile.isSilo` — verify TileObject ID 302
 2. Must contain Animal Food (item 344) in chest
-3. Multi-tile: conveyor can touch any of 4 silo tiles
+3. Multi-tile: conveyor can touch any of 4 silo tiles (pathfinder handles multi-tile)
 4. ItemSign is NOT on prefab — item 344 is hardcoded
+5. Check config `SiloFillSpeed` — old configs may still have value 2
+
+### Animation Not Playing
+1. Check `AnimationEnabled` in config (default true)
+2. If only some targets miss animation: pathfinder may not find path (check multi-tile adjacency)
+3. For outer-row crab pots: Phase 2 distance-2 check handles these
+4. If animation disabled mid-flight: running animations complete normally, only new ones skip
 
 ### Fish Pond Not Feeding
 1. Chest must be within 3 tiles (Manhattan distance) or connected via conveyor
 2. Slot 22 must be empty for food to load
 3. Source chest must contain items with `underwaterCreature` set (critters)
 4. Ponds are outdoor only — `inside` must be null
-5. Fish ponds are multi-tile (5x5) — ensure root tile resolution is working
+5. Fish ponds are multi-tile (5x5) — pathfinder handles all extension tiles
 
 ### Auto Sorter Not Firing
 1. Items only fire to chests that already have ≥1 of the same item (game's vanilla matching logic)
@@ -520,6 +612,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
+- **1.5.0** - Conveyor visual animations (items slide along paths, transfer on arrival), ConveyorPathfinder (BFS with parent tracking, multi-tile aware, distance-2 fallback), ConveyorAnimator (visual management, stagger/delay, reservation system), staggered silo bags (5 visible bags each carrying 2 items), FallbackDepositToAnyChest safety, SaveGameAnimationClearPatch, AnimationEnabled/AnimationSpeed config, SiloFillSpeed bumped to 10
 - **1.4.0** - Fish pond automation (feed critters + extract roe), bug terrarium automation (feed honey + extract cocoons), smart breeding hold (configurable), Auto Sorter as I/O chest (KeepOneItem exempt, auto-trigger on deposit, debounce batch sort), gacha machine ghost chest fix (tileObjectItemChanger filter in FindChestAt), Auto Placer support
 - **1.3.1** - Fix incubator bug (spawnsFarmAnimal guard), add GrowthStageHelper for incubator loading via conveyors
 - **1.3.0** - Silos (auto-fill, configurable speed), crab pots (bait + harvest via conveyor), bee houses/key cutters/worm farms (day change harvest), multi-tile object support, SiloFillSpeed config
@@ -537,7 +630,7 @@ Things discovered during development that are important for future work on this 
 `InventoryItem.underwaterCreature` is NOT a boolean — it's a reference to a Unity object. In C#/Unity, checking `if (item.underwaterCreature)` works because Unity overrides the implicit bool operator for UnityEngine.Object. If the reference is null/destroyed, it's falsy; if it exists, it's truthy. Do NOT compare it to `true`/`false` directly — use the implicit bool pattern.
 
 ### 2. Critters Have `itemChange` Set
-Underwater creatures (critters used as fish pond food) have `itemChange` on them. This means the generic machine-feeding code (`TryFeedAdjacentMachine`) will try to deposit critters into furnaces, grinders, etc. This is why `FishPondHelper.TryFeedPondsAndTerrariums()` MUST run before machine feeding in `ProcessAllChests()`. If you move it after, critters will be consumed by machines instead of ponds.
+Underwater creatures (critters used as fish pond food) have `itemChange` on them. This means the generic machine-feeding code (`TryFeedAdjacentMachine`) will try to deposit critters into furnaces/grinders. This is why `FishPondHelper.TryFeedPondsAndTerrariums()` MUST run before machine feeding in `ProcessAllChests()`. If you move it after, critters will be consumed by machines instead of ponds.
 
 ### 3. `getChestForRecycling` Creates Ghost Chests
 `ContainerManager.manage.getChestForRecycling(x, y, inside)` calls `getChestSaveOrCreateNewOne()`, which loads chest data from the save file at `/Chests/chest{x}+{y}.dat` and adds it to `activeChests`. If a machine (like a gacha machine) was previously at position `(x, y)` and had chest data saved, calling `getChestForRecycling` on that tile will create a phantom chest in memory that doesn't correspond to any real storage container. Items deposited there vanish.
@@ -575,5 +668,8 @@ Both are multi-tile objects. The search radius of 3 tiles (Manhattan distance) f
 ### 11. Day-Change Processing Needs Delay
 The `NewDayHarvestPatch` hooks into `refreshAllChunksNewDay()`, but chunk data isn't immediately available. A 2-second `WaitForSeconds` delay in the `DelayedHarvestProcessing` coroutine ensures tile data is loaded before scanning for harvestable machines and extractable pond/terrarium outputs.
 
-### 12. Dev Commands Can Cause Unexpected State
-Using dev commands to force day changes (skip to next day) can cause machines like gacha machines to not process properly — they may retain stale chest data. The `tileObjectItemChanger` filter in `FindChestAt()` protects against this, but be aware during testing that dev commands can create edge cases that won't appear in normal gameplay.
+### 12. dropAnItem Creates Ghost Items From Update Context
+`WorldManager.Instance.dropAnItem()` creates physical items with DroppedItem/DroppedItemBounce components. When called from animation callbacks (which fire during Update), the resulting items can become ghost objects — visible but not properly networked, causing stuck items players can't pick up. Always use `FallbackDepositToAnyChest()` instead.
+
+### 13. Animation Tile-to-World Must Match Game Placement
+The game places objects at `new Vector3(xPos * 2, heightMap[xPos, yPos], yPos * 2)` — confirmed in `NetworkMapSharer.cs:1561`. Initially the animation used `x*2+1, y*2+1` which caused items to slide along the edge of tiles instead of the center. The correct formula has NO centering offset.
