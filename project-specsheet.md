@@ -22,6 +22,7 @@
 11. **Bug Terrarium Automation** - Auto-feed honey from adjacent chests, extract cocoons on day change (3-tile radius)
 12. **Auto Sorter Integration** - Auto Sorters work as automation I/O chests, exempt from KeepOneItem, fire items on deposit
 13. **Auto Placer Support** - Auto Placers function as standard automation chests
+14. **Stackable Critters** - All underwater creatures become stackable (configurable, default on)
 
 ---
 
@@ -79,6 +80,7 @@ Autom8er namespace
 │   ├── Update() - ConveyorAnimator.UpdateAnimations() + scan timer + ProcessAllChests
 │   ├── OnDestroy() - ConveyorAnimator.ClearAllAnimations() + harmony.UnpatchSelf()
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
+│   ├── ApplyStackableCritters() - One-time: sets isStackable=true on all underwaterCreature items
 │   └── ProcessAllChests() - Main loop (ORDER MATTERS):
 │       1. FishPondHelper.TryFeedPondsAndTerrariums ← MUST BE FIRST (see Rule 7)
 │       2. TryFeedAdjacentMachine (furnaces, etc)
@@ -375,6 +377,9 @@ Same architecture as fish ponds but:
 - Called in output functions to skip white containers
 - White containers CAN still feed machines (not blocked in input functions)
 
+### Stackable Critters (v1.5.0)
+On first `Update()` tick, `ApplyStackableCritters()` iterates all `Inventory.Instance.allItems` and sets `isStackable = true` on any item with `underwaterCreature` set. This directly modifies the item data — no Harmony patch needed. Works everywhere including the 2 places in `Inventory.cs` that check the `isStackable` field directly (UI stacking logic). Config `StackableCritters = false` skips the modification entirely (vanilla behavior). Fish pond feeding is unaffected — our code already takes exactly 1 critter per feeding cycle regardless of stack size.
+
 ---
 
 ## Configuration
@@ -395,6 +400,7 @@ BepInEx/config/topmass.autom8er.cfg
 | `HoldOutputForBreeding` | Fish Pond & Terrarium | true | true/false | Hold 15 roe / 10 cocoons when < 5 creatures |
 | `AnimationEnabled` | Conveyor Animation | true | true/false | Show items visually moving along conveyors. Disable for instant transfers |
 | `AnimationSpeed` | Conveyor Animation | 2 | 0.5-10 | Speed of conveyor animations in tiles per second |
+| `StackableCritters` | Quality of Life | true | true/false | Make all critters stackable in inventory and chests |
 
 ### Runtime Tile Type Caching
 ```csharp
@@ -625,7 +631,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
-- **1.5.0** - Conveyor visual animations (items slide along paths, transfer on arrival), ConveyorPathfinder (BFS with parent tracking, multi-tile aware, distance-2 fallback), ConveyorAnimator (visual management, stagger/delay, reservation system), staggered silo bags (5 visible bags each carrying 2 items), FallbackDepositToAnyChest safety, SaveGameAnimationClearPatch, AnimationEnabled/AnimationSpeed config, SiloFillSpeed bumped to 10
+- **1.5.0** - Conveyor visual animations (items slide along paths, transfer on arrival), ConveyorPathfinder (BFS with parent tracking, multi-tile aware, distance-2 fallback), ConveyorAnimator (visual management, stagger/delay, reservation system), staggered silo bags (5 visible bags each carrying 2 items), FallbackDepositToAnyChest safety, SaveGameAnimationClearPatch, AnimationEnabled/AnimationSpeed config, SiloFillSpeed bumped to 10, stackable critters QoL (configurable), auto sorter first-load activation fix
 - **1.4.0** - Fish pond automation (feed critters + extract roe), bug terrarium automation (feed honey + extract cocoons), smart breeding hold (configurable), Auto Sorter as I/O chest (KeepOneItem exempt, auto-trigger on deposit, debounce batch sort), gacha machine ghost chest fix (tileObjectItemChanger filter in FindChestAt), Auto Placer support
 - **1.3.1** - Fix incubator bug (spawnsFarmAnimal guard), add GrowthStageHelper for incubator loading via conveyors
 - **1.3.0** - Silos (auto-fill, configurable speed), crab pots (bait + harvest via conveyor), bee houses/key cutters/worm farms (day change harvest), multi-tile object support, SiloFillSpeed config

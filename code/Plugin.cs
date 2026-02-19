@@ -25,6 +25,7 @@ namespace Autom8er
         private ConfigEntry<bool> configHoldOutputForBreeding;
         private ConfigEntry<bool> configAnimationEnabled;
         private ConfigEntry<float> configAnimationSpeed;
+        private ConfigEntry<bool> configStackableCritters;
 
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
@@ -47,6 +48,8 @@ namespace Autom8er
         public static bool HoldOutputForBreeding = true;
         public static bool AnimationEnabled = true;
         public static float AnimationSpeed = 2f;
+        public static bool StackableCritters = true;
+        private bool crittersPatched = false;
 
         private void Awake()
         {
@@ -126,6 +129,15 @@ namespace Autom8er
                 "Range: 0.5 to 10. Higher = faster animations."
             );
 
+            configStackableCritters = Config.Bind(
+                "Quality of Life",
+                "StackableCritters",
+                true,
+                "Makes all critters (underwater creatures) stackable in inventory and chests.\n" +
+                "Helps with automation and storage management.\n" +
+                "Disable to keep vanilla critter stacking behavior (1 per slot)."
+            );
+
             ConveyorTileItemId = configConveyorTileItemId.Value;
             KeepOneItem = configKeepOneItem.Value;
             ScanInterval = Mathf.Clamp(configScanInterval.Value, 0.1f, 1.0f);
@@ -134,8 +146,9 @@ namespace Autom8er
             HoldOutputForBreeding = configHoldOutputForBreeding.Value;
             AnimationEnabled = configAnimationEnabled.Value;
             AnimationSpeed = Mathf.Clamp(configAnimationSpeed.Value, 0.5f, 10f);
+            StackableCritters = configStackableCritters.Value;
 
-            Log.LogInfo("Autom8er v1.5.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed);
+            Log.LogInfo("Autom8er v1.5.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -155,6 +168,11 @@ namespace Autom8er
             if (ConveyorTileType == -1)
             {
                 CacheConveyorTileType();
+            }
+
+            if (!crittersPatched && StackableCritters)
+            {
+                ApplyStackableCritters();
             }
 
             ConveyorAnimator.UpdateAnimations();
@@ -188,6 +206,23 @@ namespace Autom8er
             {
                 Log.LogWarning("Autom8er: Invalid conveyor tile Item ID: " + ConveyorTileItemId);
             }
+        }
+
+        private void ApplyStackableCritters()
+        {
+            crittersPatched = true;
+            int count = 0;
+            for (int i = 0; i < Inventory.Instance.allItems.Length; i++)
+            {
+                InventoryItem item = Inventory.Instance.allItems[i];
+                if (item != null && (bool)item.underwaterCreature && !item.isStackable)
+                {
+                    item.isStackable = true;
+                    count++;
+                }
+            }
+            if (count > 0)
+                Log.LogInfo("Autom8er: Made " + count + " critters stackable");
         }
 
         private void ProcessAllChests()
