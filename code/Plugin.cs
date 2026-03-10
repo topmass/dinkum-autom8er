@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.5.0")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.5.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -148,7 +148,7 @@ namespace Autom8er
             AnimationSpeed = Mathf.Clamp(configAnimationSpeed.Value, 0.5f, 10f);
             StackableCritters = configStackableCritters.Value;
 
-            Log.LogInfo("Autom8er v1.5.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
+            Log.LogInfo("Autom8er v1.5.1 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -279,6 +279,146 @@ namespace Autom8er
         }
     }
 
+    public static class AutomationCreditHelper
+    {
+        public static void TryGrantMachineInputCredit(int itemId, int tileObjectId)
+        {
+            if (itemId < 0 || tileObjectId < 0 || Inventory.Instance == null)
+                return;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            if (item == null || item.itemChange == null)
+                return;
+
+            try
+            {
+                item.itemChange.checkTask(tileObjectId);
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Autom8er: Failed to grant machine credit for item " + itemId + " -> machine " + tileObjectId + ": " + e.Message);
+            }
+        }
+
+        public static void TryGrantHarvestMilestone(int tileObjectId)
+        {
+            if (tileObjectId < 0 || WorldManager.Instance == null || DailyTaskGenerator.generate == null)
+                return;
+
+            TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
+            if (tileObj == null || tileObj.tileObjectGrowthStages == null)
+                return;
+
+            DailyTaskGenerator.genericTaskType milestone = tileObj.tileObjectGrowthStages.milestoneOnHarvest;
+            if (milestone == DailyTaskGenerator.genericTaskType.None)
+                return;
+
+            try
+            {
+                DailyTaskGenerator.generate.doATask(milestone);
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Autom8er: Failed to grant harvest milestone for tile object " + tileObjectId + ": " + e.Message);
+            }
+        }
+
+        public static void TryGrantGrowthHarvestCredit(int tileObjectId)
+        {
+            if (tileObjectId < 0 || WorldManager.Instance == null)
+                return;
+
+            TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
+            if (tileObj == null || tileObj.tileObjectGrowthStages == null)
+                return;
+
+            TileObjectGrowthStages growth = tileObj.tileObjectGrowthStages;
+
+            try
+            {
+                if (CharLevelManager.manage != null)
+                {
+                    if (growth.needsTilledSoil || growth.isAPlantSproutFromAFarmPlant(tileObj.tileObjectId))
+                    {
+                        if (growth.diesOnHarvest)
+                        {
+                            CharLevelManager.manage.addXp(CharLevelManager.SkillTypes.Farming, Mathf.Clamp(growth.objectStages.Length / 3, 1, 12));
+                        }
+                        else
+                        {
+                            CharLevelManager.manage.addXp(CharLevelManager.SkillTypes.Farming, Mathf.Clamp(growth.objectStages.Length / 8, 1, 12));
+                        }
+                    }
+                    else if (growth.mustBeInWater)
+                    {
+                        CharLevelManager.manage.addXp(CharLevelManager.SkillTypes.Fishing, 3);
+                    }
+                    else if ((bool)growth.harvestDrop && (!growth.harvestDrop.placeable || growth.harvestDrop.placeable.tileObjectId != tileObj.tileObjectId))
+                    {
+                        CharLevelManager.manage.addXp(CharLevelManager.SkillTypes.Foraging, 1);
+                    }
+                }
+
+                if (DailyTaskGenerator.generate == null)
+                    return;
+
+                if (growth.needsTilledSoil || growth.isAPlantSproutFromAFarmPlant(tileObj.tileObjectId))
+                {
+                    DailyTaskGenerator.generate.doATask(DailyTaskGenerator.genericTaskType.HarvestCrops);
+                }
+
+                if (growth.isCrabPot)
+                    return;
+
+                int amount = 1;
+                if (!growth.normalPickUp && !growth.autoPickUpOnHarvest && growth.harvestSpots != null && growth.harvestSpots.Length > 0)
+                {
+                    amount = growth.harvestSpots.Length;
+                }
+
+                DailyTaskGenerator.generate.doATaskTileObject(DailyTaskGenerator.genericTaskType.Harvest, tileObj.tileObjectId, amount);
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Autom8er: Failed to grant growth harvest credit for tile object " + tileObjectId + ": " + e.Message);
+            }
+        }
+
+        public static void TryGrantOutputCredit(int tileObjectId, int itemId, int amount)
+        {
+            if (tileObjectId < 0 || itemId < 0 || amount <= 0 || WorldManager.Instance == null || CharLevelManager.manage == null)
+                return;
+
+            TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
+            if (tileObj == null)
+                return;
+
+            int tallyType = tileObj.getXpTallyType();
+            if (tallyType < 0)
+                return;
+
+            try
+            {
+                CharLevelManager.manage.addToDayTally(itemId, amount, tallyType);
+
+                InventoryItem item = Inventory.Instance != null ? Inventory.Instance.allItems[itemId] : null;
+                if (item != null && (bool)item.underwaterCreature && PediaManager.manage != null)
+                {
+                    PediaManager.manage.addCaughtToList(itemId);
+                }
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Autom8er: Failed to grant harvest output credit for item " + itemId + ": " + e.Message);
+            }
+        }
+
+        public static void TryGrantHarvestOutputCredit(int tileObjectId, int itemId, int amount)
+        {
+            TryGrantOutputCredit(tileObjectId, itemId, amount);
+        }
+    }
+
     [HarmonyPatch(typeof(ItemDepositAndChanger), "ejectItemOnCycle")]
     public static class EjectItemOnCyclePatch
     {
@@ -322,14 +462,23 @@ namespace Autom8er
             }
 
             // Priority 1: Direct adjacent chest (not white/input-only)
-            if (ConveyorHelper.TryDepositToAdjacentChest(xPos, yPos, inside, resultItemId, stackAmount))
+            int sourceTileObjectId = inside != null
+                ? inside.houseMapOnTile[xPos, yPos]
+                : WorldManager.Instance.onTileMap[xPos, yPos];
+
+            System.Action grantOutputCredit = () =>
+            {
+                AutomationCreditHelper.TryGrantOutputCredit(sourceTileObjectId, resultItemId, stackAmount);
+            };
+
+            if (ConveyorHelper.TryDepositToAdjacentChest(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
             {
                 Plugin.Log.LogInfo("Autom8er: Machine output -> " + Inventory.Instance.allItems[resultItemId].itemName);
                 return false;
             }
 
             // Priority 2: Via Black Marble Path conveyor network
-            if (ConveyorHelper.TryDepositViaConveyorPath(xPos, yPos, inside, resultItemId, stackAmount))
+            if (ConveyorHelper.TryDepositViaConveyorPath(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
             {
                 Plugin.Log.LogInfo("Autom8er: Machine output via conveyor -> " + Inventory.Instance.allItems[resultItemId].itemName);
                 return false;
@@ -363,6 +512,7 @@ namespace Autom8er
 
             // Harvest all items to chest
             bool harvestedAny = false;
+            int sourceTileObjectId = __instance.GetComponent<TileObject>().tileObjectId;
 
             if (__instance.isCrabPot)
             {
@@ -379,8 +529,12 @@ namespace Autom8er
                         HouseDetails capturedInside = inside;
                         System.Action depositHarvest = () =>
                         {
-                            if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1))
-                                ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1);
+                            if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1,
+                                () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1)))
+                            {
+                                ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
+                                    () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1));
+                            }
                         };
 
                         ConveyorAnimator.AnimateTransfer(itemId, 1,
@@ -415,8 +569,12 @@ namespace Autom8er
                                 HouseDetails capturedInside = inside;
                                 System.Action depositHarvest = () =>
                                 {
-                                    if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1))
-                                        ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1);
+                                    if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1,
+                                        () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1)))
+                                    {
+                                        ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
+                                            () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1));
+                                    }
                                 };
 
                                 ConveyorAnimator.AnimateTransfer(itemId, 1,
@@ -452,8 +610,12 @@ namespace Autom8er
                                     HouseDetails capturedInside = inside;
                                     System.Action depositHarvest = () =>
                                     {
-                                        if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1))
-                                            ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1);
+                                        if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1,
+                                            () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1)))
+                                        {
+                                            ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
+                                                () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1));
+                                        }
                                     };
 
                                     ConveyorAnimator.AnimateTransfer(itemId, 1,
@@ -626,7 +788,8 @@ namespace Autom8er
             }
 
             // BFS along conveyor tiles to find a chest
-            int maxSteps = 50;
+            // 2000 limit supports large snake arrays (200-300 machines) on day-change harvest
+            int maxSteps = 2000;
             while (queue.Count > 0 && maxSteps-- > 0)
             {
                 var (cx, cy) = queue.Dequeue();
@@ -671,7 +834,7 @@ namespace Autom8er
             return null;
         }
 
-        public static bool TryDepositHarvestToChest(Chest chest, HouseDetails inside, int itemId, int amount)
+        public static bool TryDepositHarvestToChest(Chest chest, HouseDetails inside, int itemId, int amount, System.Action onDepositSuccess = null)
         {
             if (chest == null || itemId < 0)
                 return false;
@@ -698,6 +861,9 @@ namespace Autom8er
             // Queue AutoSorter to batch-fire items to nearby chests
             if (ConveyorHelper.IsAutoSorter(chest))
                 ConveyorHelper.QueueAutoSorterUpdate(chest);
+
+            if (onDepositSuccess != null)
+                onDepositSuccess();
 
             return true;
         }
@@ -799,7 +965,8 @@ namespace Autom8er
 
             // BFS along conveyor tiles, checking tiles within 2-tile radius for harvestables
             // (2-tile radius needed for crab pots in water)
-            int maxSteps = 100;
+            // 2000 limit supports large snake arrays (200-300 machines) on day-change harvest
+            int maxSteps = 2000;
             while (queue.Count > 0 && maxSteps-- > 0)
             {
                 var (cx, cy) = queue.Dequeue();
@@ -895,6 +1062,9 @@ namespace Autom8er
 
             try
             {
+                AutomationCreditHelper.TryGrantGrowthHarvestCredit(tileObjectId);
+                AutomationCreditHelper.TryGrantHarvestMilestone(tileObjectId);
+
                 // This machine is ready to harvest - trigger harvest
                 // The Harmony patch will redirect output to chest
                 growth.harvest(xPos, yPos);
@@ -1012,6 +1182,7 @@ namespace Autom8er
                         NetworkMapSharer.Instance.RpcDepositItemIntoChanger(itemId, machineX, machineY);
                     }
                     NetworkMapSharer.Instance.startTileTimerOnServer(itemId, machineX, machineY, inside);
+                    AutomationCreditHelper.TryGrantMachineInputCredit(itemId, tileObjectId);
 
                     // Update chest slot
                     if (isFuelItem)
@@ -1212,6 +1383,7 @@ namespace Autom8er
                                     else
                                         NetworkMapSharer.Instance.RpcDepositItemIntoChanger(capturedItemId, capturedMachineX, capturedMachineY);
                                     NetworkMapSharer.Instance.startTileTimerOnServer(capturedItemId, capturedMachineX, capturedMachineY, capturedInside);
+                                    AutomationCreditHelper.TryGrantMachineInputCredit(capturedItemId, tileObjectId);
                                 }
                                 else if (!FallbackDepositToAnyChest(capturedMachineX, capturedMachineY, capturedInside, capturedItemId, 1))
                                 {
@@ -1233,6 +1405,7 @@ namespace Autom8er
                                 NetworkMapSharer.Instance.RpcDepositItemIntoChanger(itemId, machineX, machineY);
                             }
                             NetworkMapSharer.Instance.startTileTimerOnServer(itemId, machineX, machineY, inside);
+                            AutomationCreditHelper.TryGrantMachineInputCredit(itemId, tileObjectId);
                         }
 
                         Plugin.Log.LogInfo("Autom8er: Conveyor input -> Machine: " + (isFuelItem ? "1" : amountNeeded.ToString()) + "x " + item.itemName);
@@ -1244,7 +1417,7 @@ namespace Autom8er
             return false;
         }
 
-        public static bool TryDepositToAdjacentChest(int machineX, int machineY, HouseDetails inside, int itemId, int stackAmount)
+        public static bool TryDepositToAdjacentChest(int machineX, int machineY, HouseDetails inside, int itemId, int stackAmount, System.Action onDepositSuccess = null)
         {
             for (int i = 0; i < 4; i++)
             {
@@ -1287,13 +1460,16 @@ namespace Autom8er
                 if (IsAutoSorter(chest))
                     QueueAutoSorterUpdate(chest);
 
+                if (onDepositSuccess != null)
+                    onDepositSuccess();
+
                 return true;
             }
 
             return false;
         }
 
-        public static bool TryDepositViaConveyorPath(int machineX, int machineY, HouseDetails inside, int itemId, int stackAmount)
+        public static bool TryDepositViaConveyorPath(int machineX, int machineY, HouseDetails inside, int itemId, int stackAmount, System.Action onDepositSuccess = null)
         {
             if (Plugin.ConveyorTileType == -1)
                 return false;
@@ -1403,7 +1579,7 @@ namespace Autom8er
                             int arrivalSlot = FindSlotForItem(capturedChest, capturedItemId);
                             if (arrivalSlot == -1)
                             {
-                                if (!FallbackDepositToAnyChest(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack))
+                                if (!FallbackDepositToAnyChest(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess))
                                     Plugin.Log.LogWarning("Autom8er: Target chest full on arrival — no chest available, item lost!");
                                 return;
                             }
@@ -1424,6 +1600,9 @@ namespace Autom8er
 
                             if (IsAutoSorter(capturedChest))
                                 QueueAutoSorterUpdate(capturedChest);
+
+                            if (onDepositSuccess != null)
+                                onDepositSuccess();
                         };
 
                         ConveyorAnimator.StartAnimation(itemId, stackAmount, path, onArrival);
@@ -1447,6 +1626,9 @@ namespace Autom8er
 
                         if (IsAutoSorter(chest))
                             QueueAutoSorterUpdate(chest);
+
+                        if (onDepositSuccess != null)
+                            onDepositSuccess();
                     }
 
                     return true;
@@ -1457,10 +1639,10 @@ namespace Autom8er
         }
 
         // Fallback for animation callbacks when the intended destination is unavailable on arrival
-        public static bool FallbackDepositToAnyChest(int originX, int originY, HouseDetails inside, int itemId, int stackAmount)
+        public static bool FallbackDepositToAnyChest(int originX, int originY, HouseDetails inside, int itemId, int stackAmount, System.Action onDepositSuccess = null)
         {
             // First try adjacent chests
-            if (TryDepositToAdjacentChest(originX, originY, inside, itemId, stackAmount))
+            if (TryDepositToAdjacentChest(originX, originY, inside, itemId, stackAmount, onDepositSuccess))
                 return true;
 
             // Then try chests on the conveyor network (instant, no animation)
@@ -1534,6 +1716,9 @@ namespace Autom8er
 
                     if (IsAutoSorter(chest))
                         QueueAutoSorterUpdate(chest);
+
+                    if (onDepositSuccess != null)
+                        onDepositSuccess();
 
                     return true;
                 }
@@ -3291,10 +3476,12 @@ namespace Autom8er
             Chest capturedChest = targetChest;
             System.Action depositOutput = () =>
             {
-                if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, null, capturedOutputId, capturedExtract))
+                if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, null, capturedOutputId, capturedExtract,
+                    () => AutomationCreditHelper.TryGrantOutputCredit(tileObjectId, capturedOutputId, capturedExtract)))
                 {
                     // Chest full on arrival — try any reachable chest
-                    ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, null, capturedOutputId, capturedExtract);
+                    ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, null, capturedOutputId, capturedExtract,
+                        () => AutomationCreditHelper.TryGrantOutputCredit(tileObjectId, capturedOutputId, capturedExtract));
                 }
             };
 

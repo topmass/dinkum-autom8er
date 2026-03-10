@@ -4,14 +4,14 @@
     <TargetFramework>net472</TargetFramework>
     <AssemblyName>topmass.autom8er</AssemblyName>
     <Product>Autom8er - Automation and conveyor belts for Dinkum machines</Product>
-    <Version>1.2.0</Version>
+    <Version>1.5.1</Version>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <LangVersion>7.3</LangVersion>
     <RootNamespace>Autom8er</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="UnityEngine.Modules" Version="2022.3.2" IncludeAssets="compile" />
+    <PackageReference Include="UnityEngine.Modules" Version="2021.3.33" IncludeAssets="compile" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.2" PrivateAssets="all" />
   </ItemGroup>
 

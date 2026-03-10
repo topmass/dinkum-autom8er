@@ -1,7 +1,7 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** 1.5.0
+**Version:** 1.5.1
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
@@ -631,6 +631,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
+- **1.5.1** - Restored player credit across all Autom8er automation paths. Standard machine outputs now award credit when automation deposits them into storage, and harvest-style automation (bee houses, key cutters, worm farms, crab pots, fish ponds, bug terrariums) now grants the same player credit when output lands successfully. Also hardens large automation arrays by awarding credit on successful deposit/fallback rather than relying on dropped-item pickup flow.
 - **1.5.0** - Conveyor visual animations (items slide along paths, transfer on arrival), ConveyorPathfinder (BFS with parent tracking, multi-tile aware, distance-2 fallback), ConveyorAnimator (visual management, stagger/delay, reservation system), staggered silo bags (5 visible bags each carrying 2 items), FallbackDepositToAnyChest safety, SaveGameAnimationClearPatch, AnimationEnabled/AnimationSpeed config, SiloFillSpeed bumped to 10, stackable critters QoL (configurable), auto sorter first-load activation fix
 - **1.4.0** - Fish pond automation (feed critters + extract roe), bug terrarium automation (feed honey + extract cocoons), smart breeding hold (configurable), Auto Sorter as I/O chest (KeepOneItem exempt, auto-trigger on deposit, debounce batch sort), gacha machine ghost chest fix (tileObjectItemChanger filter in FindChestAt), Auto Placer support
 - **1.3.1** - Fix incubator bug (spawnsFarmAnimal guard), add GrowthStageHelper for incubator loading via conveyors
@@ -642,6 +643,15 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Learnings — Game Mechanics & Gotchas
+
+### Automation Credit Must Be Granted On Successful Deposit
+Vanilla standard machines often get visible progression through a dropped-item path: machine output becomes a world drop, then the player picks it up, and the pickup applies end-of-day tally. Autom8er bypasses that whenever it routes output directly into storage. For reliable credit, award progression when the automated deposit actually succeeds, including fallback chest reroutes.
+
+Rules:
+1. Standard machine input automation still needs `itemChange.checkTask(...)` on insert.
+2. Standard machine output automation must grant output credit on successful chest deposit, not only on the original machine trigger.
+3. Any fallback deposit path must trigger the same credit callback or large automation arrays can lose progression silently.
+4. Harvest-style automation must only grant output credit after the item is successfully stored.
 
 Things discovered during development that are important for future work on this mod.
 
