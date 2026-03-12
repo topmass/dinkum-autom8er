@@ -814,10 +814,8 @@ namespace Autom8er
                 }
             }
 
-            // BFS along conveyor tiles to find a chest
-            // 2000 limit supports large snake arrays (200-300 machines) on day-change harvest
-            int maxSteps = 2000;
-            while (queue.Count > 0 && maxSteps-- > 0)
+            // BFS along conveyor tiles to find a chest. visited prevents infinite loops.
+            while (queue.Count > 0)
             {
                 var (cx, cy) = queue.Dequeue();
 
@@ -991,11 +989,9 @@ namespace Autom8er
                 }
             }
 
-            // BFS along conveyor tiles, checking tiles within 2-tile radius for harvestables
-            // (2-tile radius needed for crab pots in water)
-            // 2000 limit supports large snake arrays (200-300 machines) on day-change harvest
-            int maxSteps = 2000;
-            while (queue.Count > 0 && maxSteps-- > 0)
+            // BFS along conveyor tiles, checking tiles within 2-tile radius for harvestables.
+            // visitedConveyors prevents infinite loops.
+            while (queue.Count > 0)
             {
                 var (cx, cy) = queue.Dequeue();
 
@@ -1362,9 +1358,8 @@ namespace Autom8er
             if (pathNetwork.Count == 0)
                 return false;
 
-            // BFS to find all connected path tiles
-            int maxPathTiles = 500;
-            while (toExplore.Count > 0 && pathNetwork.Count < maxPathTiles)
+            // BFS to find all connected path tiles.
+            while (toExplore.Count > 0)
             {
                 Vector2Int current = toExplore.Dequeue();
 
@@ -1620,9 +1615,8 @@ namespace Autom8er
             if (pathNetwork.Count == 0)
                 return false;
 
-            // BFS to find all connected path tiles (limit to prevent infinite loops)
-            int maxPathTiles = 500;
-            while (toExplore.Count > 0 && pathNetwork.Count < maxPathTiles)
+            // BFS to find all connected path tiles.
+            while (toExplore.Count > 0)
             {
                 Vector2Int current = toExplore.Dequeue();
 
@@ -1784,8 +1778,7 @@ namespace Autom8er
                 }
             }
 
-            int maxPathTiles = 500;
-            while (toExplore.Count > 0 && pathNetwork.Count < maxPathTiles)
+            while (toExplore.Count > 0)
             {
                 Vector2Int current = toExplore.Dequeue();
                 for (int i = 0; i < 4; i++)
@@ -2590,8 +2583,7 @@ namespace Autom8er
             }
 
             // BFS along conveyor tiles, checking 2-tile radius around each for crab pots
-            int maxSteps = 100;
-            while (queue.Count > 0 && maxSteps-- > 0)
+            while (queue.Count > 0)
             {
                 var (cx, cy) = queue.Dequeue();
 
@@ -2784,8 +2776,7 @@ namespace Autom8er
                 }
             }
 
-            int maxSteps = 100;
-            while (queue.Count > 0 && maxSteps-- > 0)
+            while (queue.Count > 0)
             {
                 var (cx, cy) = queue.Dequeue();
 
@@ -3001,8 +2992,7 @@ namespace Autom8er
             }
 
             // BFS along conveyor tiles, checking adjacent tiles for silos
-            int maxSteps = 100;
-            while (queue.Count > 0 && maxSteps-- > 0)
+            while (queue.Count > 0)
             {
                 var (cx, cy) = queue.Dequeue();
 
@@ -3238,8 +3228,7 @@ namespace Autom8er
                 }
             }
 
-            int maxSteps = 100;
-            while (queue.Count > 0 && maxSteps-- > 0)
+            while (queue.Count > 0)
             {
                 var (cx, cy) = queue.Dequeue();
 
@@ -3468,8 +3457,7 @@ namespace Autom8er
                 }
             }
 
-            int maxSteps = 100;
-            while (queue.Count > 0 && maxSteps-- > 0)
+            while (queue.Count > 0)
             {
                 var (cx, cy) = queue.Dequeue();
 
