@@ -539,7 +539,8 @@ namespace Autom8er
 
                         ConveyorAnimator.AnimateTransfer(itemId, 1,
                             new Vector2Int(xPos, yPos),
-                            new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest);
+                            new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
+                            HarvestHelper.GetNextDayChangeAnimationDelay(targetChest));
 
                         Plugin.Log.LogInfo("Autom8er: Crab pot harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                     }
@@ -579,7 +580,8 @@ namespace Autom8er
 
                                 ConveyorAnimator.AnimateTransfer(itemId, 1,
                                     new Vector2Int(xPos, yPos),
-                                    new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest);
+                                    new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
+                                    HarvestHelper.GetNextDayChangeAnimationDelay(targetChest));
 
                                 Plugin.Log.LogInfo("Autom8er: Harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                             }
@@ -620,7 +622,8 @@ namespace Autom8er
 
                                     ConveyorAnimator.AnimateTransfer(itemId, 1,
                                         new Vector2Int(xPos, yPos),
-                                        new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest);
+                                        new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
+                                        HarvestHelper.GetNextDayChangeAnimationDelay(targetChest));
 
                                     Plugin.Log.LogInfo("Autom8er: Harvest (loot) -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                                 }
@@ -695,9 +698,33 @@ namespace Autom8er
     {
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
+        private const int DAY_CHANGE_ANIMATION_BATCH_SIZE = 100;
+        private const float DAY_CHANGE_ANIMATION_BATCH_DELAY = 0.2f;
+        private static Dictionary<long, int> dayChangeAnimationCounts = new Dictionary<long, int>();
 
         // Used to pass inside context from TryAutoHarvestAt to HarvestPatch
         public static HouseDetails CurrentHarvestInside = null;
+
+        public static void ResetDayChangeAnimationStagger()
+        {
+            dayChangeAnimationCounts.Clear();
+        }
+
+        public static float GetNextDayChangeAnimationDelay(Chest chest)
+        {
+            if (chest == null)
+                return 0f;
+
+            long chestKey = (((long)chest.xPos & 0xFFFFFL) << 44)
+                | (((long)chest.yPos & 0xFFFFFL) << 24)
+                | (((long)(chest.insideX + 1) & 0xFFFL) << 12)
+                | ((long)(chest.insideY + 1) & 0xFFFL);
+
+            int currentCount = 0;
+            dayChangeAnimationCounts.TryGetValue(chestKey, out currentCount);
+            dayChangeAnimationCounts[chestKey] = currentCount + 1;
+            return (currentCount / DAY_CHANGE_ANIMATION_BATCH_SIZE) * DAY_CHANGE_ANIMATION_BATCH_DELAY;
+        }
 
         public static Chest FindAdjacentChestForHarvest(int machineX, int machineY, HouseDetails inside, int searchRadius = 1)
         {
@@ -874,6 +901,8 @@ namespace Autom8er
             if (!NetworkMapSharer.Instance.isServer)
                 return;
 
+            ResetDayChangeAnimationStagger();
+
             HashSet<long> checkedPositions = new HashSet<long>();
 
             // Create a copy of the list to avoid "Collection was modified" exception
@@ -919,8 +948,7 @@ namespace Autom8er
                         long key = ((long)checkX << 32) | (uint)checkY;
                         if (!checkedPositions.Contains(key))
                         {
-                            checkedPositions.Add(key);
-                            TryAutoHarvestAt(checkX, checkY, inside);
+                            ScanConnectedHarvestArray(checkX, checkY, inside, checkedPositions);
                         }
                     }
                 }
@@ -992,8 +1020,7 @@ namespace Autom8er
                         long machineKey = ((long)checkX << 32) | (uint)checkY;
                         if (!checkedPositions.Contains(machineKey))
                         {
-                            checkedPositions.Add(machineKey);
-                            TryAutoHarvestAt(checkX, checkY, null);
+                            ScanConnectedHarvestArray(checkX, checkY, null, checkedPositions);
                         }
                     }
                 }
@@ -1018,6 +1045,98 @@ namespace Autom8er
                     }
                 }
             }
+        }
+
+        private static void ScanConnectedHarvestArray(int seedX, int seedY, HouseDetails inside, HashSet<long> checkedPositions)
+        {
+            int mapW = inside != null ? inside.houseMapOnTile.GetLength(0) : WorldManager.Instance.onTileMap.GetLength(0);
+            int mapH = inside != null ? inside.houseMapOnTile.GetLength(1) : WorldManager.Instance.onTileMap.GetLength(1);
+
+            int rootX;
+            int rootY;
+            int tileObjectId;
+            if (!TryGetHarvestArrayRoot(seedX, seedY, inside, out rootX, out rootY, out tileObjectId))
+                return;
+
+            Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
+            HashSet<long> queuedRoots = new HashSet<long>();
+
+            long seedKey = ((long)rootX << 32) | (uint)rootY;
+            queue.Enqueue((rootX, rootY));
+            queuedRoots.Add(seedKey);
+
+            while (queue.Count > 0)
+            {
+                var (currentX, currentY) = queue.Dequeue();
+                long currentKey = ((long)currentX << 32) | (uint)currentY;
+                if (checkedPositions.Contains(currentKey))
+                    continue;
+
+                checkedPositions.Add(currentKey);
+                TryAutoHarvestAt(currentX, currentY, inside);
+
+                TileObject currentTileObj = WorldManager.Instance.allObjects[tileObjectId];
+                TileObjectGrowthStages currentGrowth = currentTileObj != null ? currentTileObj.tileObjectGrowthStages : null;
+                int searchRadius = currentGrowth != null && currentGrowth.isCrabPot ? 2 : 1;
+
+                for (int offsetX = -searchRadius; offsetX <= searchRadius; offsetX++)
+                {
+                    for (int offsetY = -searchRadius; offsetY <= searchRadius; offsetY++)
+                    {
+                        if (offsetX == 0 && offsetY == 0)
+                            continue;
+
+                        if (Mathf.Abs(offsetX) + Mathf.Abs(offsetY) > searchRadius)
+                            continue;
+
+                        int nextX = currentX + offsetX;
+                        int nextY = currentY + offsetY;
+                        if (nextX < 0 || nextY < 0 || nextX >= mapW || nextY >= mapH)
+                            continue;
+
+                        int nextRootX;
+                        int nextRootY;
+                        int nextTileObjectId;
+                        if (!TryGetHarvestArrayRoot(nextX, nextY, inside, out nextRootX, out nextRootY, out nextTileObjectId))
+                            continue;
+
+                        if (nextTileObjectId != tileObjectId)
+                            continue;
+
+                        long nextKey = ((long)nextRootX << 32) | (uint)nextRootY;
+                        if (queuedRoots.Add(nextKey))
+                            queue.Enqueue((nextRootX, nextRootY));
+                    }
+                }
+            }
+        }
+
+        private static bool TryGetHarvestArrayRoot(int xPos, int yPos, HouseDetails inside, out int rootX, out int rootY, out int tileObjectId)
+        {
+            rootX = xPos;
+            rootY = yPos;
+            tileObjectId = inside != null ? inside.houseMapOnTile[xPos, yPos] : WorldManager.Instance.onTileMap[xPos, yPos];
+
+            if (tileObjectId < -1)
+            {
+                Vector2 rootPos = WorldManager.Instance.findMultiTileObjectPos(xPos, yPos);
+                rootX = (int)rootPos.x;
+                rootY = (int)rootPos.y;
+                tileObjectId = inside != null ? inside.houseMapOnTile[rootX, rootY] : WorldManager.Instance.onTileMap[rootX, rootY];
+            }
+
+            if (tileObjectId < 0)
+                return false;
+
+            TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
+            if (tileObj == null || tileObj.tileObjectGrowthStages == null)
+                return false;
+
+            TileObjectGrowthStages growth = tileObj.tileObjectGrowthStages;
+            if (growth.spawnsFarmAnimal)
+                return false;
+
+            return true;
         }
 
         public static void TryAutoHarvestAt(int xPos, int yPos, HouseDetails inside)
@@ -2064,7 +2183,9 @@ namespace Autom8er
 
             Vector2Int effectiveEnd = end;
             bool foundEnd = false;
-            int maxTiles = 500;
+            // Allow very large conveyor runs so single-chest mega arrays still animate end-to-end.
+            // Revisit protection comes from cameFrom, so this won't loop infinitely.
+            int maxTiles = mapW * mapH;
             int visited = 0;
 
             while (queue.Count > 0 && visited < maxTiles)
@@ -2364,7 +2485,7 @@ namespace Autom8er
             return activeAnimations.Count > 0;
         }
 
-        public static void AnimateTransfer(int itemId, int amount, Vector2Int source, Vector2Int dest, HouseDetails inside, System.Action depositCallback)
+        public static void AnimateTransfer(int itemId, int amount, Vector2Int source, Vector2Int dest, HouseDetails inside, System.Action depositCallback, float delay = 0f)
         {
             if (!Plugin.AnimationEnabled)
             {
@@ -2379,7 +2500,7 @@ namespace Autom8er
                 return;
             }
 
-            StartAnimation(itemId, amount, path, depositCallback);
+            StartAnimation(itemId, amount, path, depositCallback, delay);
         }
     }
 
@@ -3275,6 +3396,8 @@ namespace Autom8er
             if (!NetworkMapSharer.Instance.isServer)
                 return;
 
+            HarvestHelper.ResetDayChangeAnimationStagger();
+
             HashSet<long> checkedPonds = new HashSet<long>();
             List<Chest> chestsCopy = new List<Chest>(ContainerManager.manage.activeChests);
 
@@ -3487,7 +3610,8 @@ namespace Autom8er
 
             ConveyorAnimator.AnimateTransfer(outputId, extractAmount,
                 new Vector2Int(rootX, rootY),
-                new Vector2Int(targetChest.xPos, targetChest.yPos), null, depositOutput);
+                new Vector2Int(targetChest.xPos, targetChest.yPos), null, depositOutput,
+                HarvestHelper.GetNextDayChangeAnimationDelay(targetChest));
 
             string typeName = isFishPond ? "fish pond" : "bug terrarium";
             string itemName = Inventory.Instance.allItems[outputId].itemName;

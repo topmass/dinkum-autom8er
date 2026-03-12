@@ -117,12 +117,15 @@ Autom8er namespace
 │   ├── ProcessHarvestableMachines() - Entry point on day change
 │   ├── ScanAndHarvestAllChests() - Scan all chests + conveyor networks
 │   ├── ScanConveyorPathForHarvestables() - BFS to find harvestable machines
+│   ├── ScanConnectedHarvestArray() - Flood-fill same-machine arrays from a chest-discovered seed
+│   ├── TryGetHarvestArrayRoot() - Resolve multi-tile roots before array traversal
 │   ├── TryAutoHarvestAt() - Harvest a single machine
 │   │   └── GUARD: if (growth.spawnsFarmAnimal) return; ← CRITICAL
 │   ├── TryDepositHarvestToChest() - Deposit items into chest
 │   │   └── Triggers QueueAutoSorterUpdate if target is Auto Sorter
 │   ├── FindAdjacentChestForHarvest() - Find output chest nearby
-│   └── FindChestViaConveyorPath() - Find chest via conveyor BFS
+│   ├── FindChestViaConveyorPath() - Find chest via conveyor BFS
+│   └── Day-change animation stagger helpers - Batch 100 outputs per chest, add 0.2s per batch
 │
 ├── ConveyorHelper (static class)
 │   ├── TryFeedAdjacentMachine() - Direct chest → machine
@@ -152,6 +155,7 @@ Autom8er namespace
 │       - Phase 1: Walk conveyor tiles, check distance-1 neighbors for destination
 │       - Phase 2: If not found, check distance-2 (outer-row crab pots)
 │       - Multi-tile aware: scans radius around start for all object tiles
+│       - Large-array safe: can traverse the full connected conveyor run instead of stopping at 500 tiles
 │       - Returns ordered List<Vector2Int> path including start and end
 │
 ├── ConveyorAnimator (static class)
@@ -169,7 +173,7 @@ Autom8er namespace
 │   │   └── Lerps position along path segments
 │   │   └── FINAL_TILE_FRACTION on last segment
 │   │   └── Executes onArrival callback when animation completes
-│   ├── AnimateTransfer(itemId, amount, source, dest, inside, callback)
+│   ├── AnimateTransfer(itemId, amount, source, dest, inside, callback, delay=0)
 │   │   └── General-purpose: FindPath + StartAnimation, instant fallback if disabled/no path
 │   ├── ReserveTarget/UnreserveTarget/IsTargetReserved
 │   │   └── HashSet<long> keyed by (x<<32|y), prevents duplicate transfers during animation
@@ -226,13 +230,14 @@ All conveyor transfers now show items visually sliding along the path. The syste
 2. Multi-tile aware: scans radius 5 around source to find all tiles of multi-tile objects (silos, fish ponds)
 3. Destination check: matches the exact tile OR any extension tile of a multi-tile object
 4. Phase 2 fallback: if destination not found at distance 1, checks distance 2 (outer-row crab pots)
-5. Returns ordered `List<Vector2Int>` from source to destination (or nearest reachable tile)
+5. Large-array safe: BFS limit scales to the map size, so long single-chest conveyor runs still get a real path
+6. Returns ordered `List<Vector2Int>` from source to destination (or nearest reachable tile)
 
 **ConveyorAnimator** — Manages visual item models sliding along paths:
 1. `StartAnimation()` instantiates the item's 3D prefab at 0.75 scale, disables physics
 2. `UpdateAnimations()` runs every frame — lerps position along path segments at `AnimationSpeed` tiles/sec
 3. `FINAL_TILE_FRACTION` (0.1) — item travels only 10% into the final destination tile before vanishing
-4. `startDelay` field — visual hidden until delay elapses (used for staggered silo bags)
+4. `startDelay` field — visual hidden until delay elapses (used for staggered silo bags and day-change mega-array batching)
 5. On arrival: executes deposit callback, destroys visual model
 
 **Reservation system** — Prevents duplicate transfers during animation:
@@ -250,6 +255,20 @@ All conveyor transfers now show items visually sliding along the path. The syste
 - `AnimateTransfer()` fires the deposit callback immediately (same frame)
 - Functionally identical to v1.4.0 behavior
 - Items removed from source, deposited to destination instantly
+
+### Day-Change Mega Arrays (single chest/crate support)
+
+Large bee hive / key cutter / worm farm / crab pot / pond / terrarium setups can now be driven from a single valid output chest:
+1. The scan still starts from chests, not from every machine on the map
+2. If a chest discovers one harvestable machine, `ScanConnectedHarvestArray()` continues through adjacent machines of the same `tileObjectId`
+3. This lets one chest reach a long contiguous machine block instead of requiring multiple chests spaced through the array
+4. Day-change outputs are staggered per destination chest:
+   - Outputs `0-99` start immediately
+   - Outputs `100-199` get `+0.2s`
+   - Outputs `200-299` get `+0.4s`
+   - and so on
+5. There is no hard cap on day-change animation count; the stagger only spreads the start cost across batches
+6. Long conveyor routes still animate because pathfinding now traverses the full connected conveyor run instead of cutting off after 500 visited tiles
 
 ### Auto Input (Chest → Machine) — ItemDepositAndChanger machines
 1. `Update()` runs at `ScanInterval` (default 0.3s) on server
@@ -631,6 +650,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
+- **Working tree after 1.5.1** - Single-chest mega-array support for day-change harvest systems. Chest-first discovery now flood-fills connected arrays of the same harvest machine type, day-change conveyor launches are staggered in 100-item / 0.2s batches per destination chest, and long conveyor runs no longer lose visuals due to the old 500-tile pathfinder limit.
 - **1.5.1** - Restored player credit across all Autom8er automation paths. Standard machine outputs now award credit when automation deposits them into storage, and harvest-style automation (bee houses, key cutters, worm farms, crab pots, fish ponds, bug terrariums) now grants the same player credit when output lands successfully. Also hardens large automation arrays by awarding credit on successful deposit/fallback rather than relying on dropped-item pickup flow.
 - **1.5.0** - Conveyor visual animations (items slide along paths, transfer on arrival), ConveyorPathfinder (BFS with parent tracking, multi-tile aware, distance-2 fallback), ConveyorAnimator (visual management, stagger/delay, reservation system), staggered silo bags (5 visible bags each carrying 2 items), FallbackDepositToAnyChest safety, SaveGameAnimationClearPatch, AnimationEnabled/AnimationSpeed config, SiloFillSpeed bumped to 10, stackable critters QoL (configurable), auto sorter first-load activation fix
 - **1.4.0** - Fish pond automation (feed critters + extract roe), bug terrarium automation (feed honey + extract cocoons), smart breeding hold (configurable), Auto Sorter as I/O chest (KeepOneItem exempt, auto-trigger on deposit, debounce batch sort), gacha machine ghost chest fix (tileObjectItemChanger filter in FindChestAt), Auto Placer support
@@ -652,6 +672,25 @@ Rules:
 2. Standard machine output automation must grant output credit on successful chest deposit, not only on the original machine trigger.
 3. Any fallback deposit path must trigger the same credit callback or large automation arrays can lose progression silently.
 4. Harvest-style automation must only grant output credit after the item is successfully stored.
+
+### Single-Chest Mega Arrays Need Two Separate Fixes
+Supporting a 1000+ contiguous day-change array from one chest required solving two different problems:
+1. Discovery: chest-first scanning must continue through connected harvest machines of the same type instead of stopping at the initial chest radius
+2. Visual launch cost: day-change outputs must be staggered per destination chest so one chest does not try to start every conveyor visual in the same frame window
+
+Rules:
+1. Keep chest-first scanning. Do not switch to global machine scans.
+2. Continue array traversal only through adjacent machines with the same `tileObjectId`.
+3. Do not cap day-change output count; stagger start times instead.
+4. If far rows deposit correctly but show no animation, check conveyor pathfinding first before changing harvest scan logic.
+
+### Long Conveyor Visuals Fail If Pathfinding Caps Too Early
+The old `ConveyorPathfinder.FindPath()` limit of 500 visited tiles was enough for normal builds, but it silently broke mega arrays: the deposit still happened, but `AnimateTransfer()` fell back to instant deposit because no path was returned.
+
+Rules:
+1. Pathfinding should only walk connected conveyor tiles, not the full map blindly.
+2. The hard cutoff must be large enough to support the full connected conveyor run.
+3. Missing visuals with correct final item totals usually means pathfinding failed and the instant deposit fallback ran.
 
 Things discovered during development that are important for future work on this mod.
 
