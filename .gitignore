@@ -15,5 +15,9 @@ Thumbs.db
 # Game DLLs (copyrighted - must not distribute)
 codebase/Libs/*.dll
 
+# Nexus/BBCode drafts (keep local, do not push)
+bbcode-description.md
+mod-page.bbcode
+
 # Keep mod DLL for distribution
 !mod/*.dll

@@ -23,6 +23,7 @@
 12. **Auto Sorter Integration** - Auto Sorters work as automation I/O chests, exempt from KeepOneItem, fire items on deposit
 13. **Auto Placer Support** - Auto Placers function as standard automation chests
 14. **Stackable Critters** - All underwater creatures become stackable (configurable, default on)
+15. **Quarry Auto-Harvest** - Vanilla quarry day-change nodes can be auto-harvested into Autom8er chest/conveyor networks
 
 ---
 
@@ -35,11 +36,13 @@
 | 417 | White Wooden Crate | INPUT ONLY container |
 | 430 | White Wooden Chest | INPUT ONLY container |
 | 985 | Egg Incubator | Growth stage object, accepts fertilized eggs |
+| 190 | Quarry | Vanilla quarry root tile used by quarry auto-harvest |
 
 ### Item IDs (for `Inventory.Instance.allItems`)
 | ID | Item | Purpose |
 |----|------|---------|
 | 344 | Animal Food | Silo fill item (hardcoded, ItemSign not on prefab) |
+| 383 | Quarry | Inventory item that places the vanilla quarry |
 | 1747 | Black Marble Path | Default conveyor tile |
 | 964 | Cobblestone Path | Alt conveyor option |
 | 346 | Rock Path | Alt conveyor option |
@@ -69,12 +72,13 @@ if (onTileMap[x, y] < -1)
 
 ## Code Structure
 
-### Plugin.cs Layout (~2750 lines)
+### Plugin.cs Layout (~3400 lines)
 ```
 Autom8er namespace
 ├── Plugin : BaseUnityPlugin
 │   ├── Config: ConveyorTileItemId, KeepOneItem, ScanInterval, SiloFillSpeed,
-│   │          AutoFeedPonds, HoldOutputForBreeding, AnimationEnabled, AnimationSpeed
+│   │          AutoFeedPonds, HoldOutputForBreeding, AnimationEnabled, AnimationSpeed,
+│   │          StackableCritters
 │   ├── Constants: WHITE_CRATE_TILE_ID (417), WHITE_CHEST_TILE_ID (430)
 │   ├── Awake() - Init config, apply Harmony patches
 │   ├── Update() - ConveyorAnimator.UpdateAnimations() + scan timer + ProcessAllChests
@@ -82,12 +86,21 @@ Autom8er namespace
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
 │   ├── ApplyStackableCritters() - One-time: sets isStackable=true on all underwaterCreature items
 │   └── ProcessAllChests() - Main loop (ORDER MATTERS):
-│       1. FishPondHelper.TryFeedPondsAndTerrariums ← MUST BE FIRST (see Rule 7)
+│       1. FishPondHelper.TryFeedPondsAndTerrariums ← MUST BE FIRST among chest-fed systems (see Rule 7)
 │       2. TryFeedAdjacentMachine (furnaces, etc)
 │       3. TryFeedMachineViaConveyorPath (furnaces via conveyor)
 │       4. CrabPotHelper.TryLoadBaitIntoCrabPots (2-tile radius)
 │       5. GrowthStageHelper.TryLoadItemsIntoGrowthStages (incubators, etc)
 │       6. SiloHelper.TryLoadFeedIntoSilos (staggered bag animations)
+│
+├── QuarryServerDropCapturePatch / QuarryDirectedServerDropCapturePatch [HarmonyPatch]
+│   └── Prefix on both NetworkMapSharer.spawnAServerDrop overloads
+│       - Active only during an automated quarry node break
+│       - Captures the node's real vanilla item drops synchronously before they become ground items
+│
+├── QuarryObjectDropSuppressPatch [HarmonyPatch]
+│   └── Prefix on NetworkMapSharer.RpcSpawnATileObjectDrop()
+│       - Suppresses the extra quarry object-drop visual while an automated quarry node is being harvested
 │
 ├── EjectItemOnCyclePatch [HarmonyPatch]
 │   └── Prefix on ItemDepositAndChanger.ejectItemOnCycle()
@@ -102,6 +115,7 @@ Autom8er namespace
 │       - 2s delay via coroutine (wait for chunk refresh)
 │       - Calls HarvestHelper.ProcessHarvestableMachines()
 │       - Calls FishPondHelper.ProcessPondAndTerrariumOutput()
+│       - Calls QuarryHelper.ProcessDayChangeQuarries()
 │
 ├── SaveGameAnimationClearPatch [HarmonyPatch]
 │   └── Prefix on SaveLoad.SaveGame()
@@ -112,6 +126,17 @@ Autom8er namespace
 │   └── Prefix on SaveLoad.loadOverFrames()
 │       - Clears pendingSorts (stale coroutine refs from previous session)
 │       - Clears all animations
+│       - Clears quarry runtime state
+│
+├── QuarryHelper (static class)
+│   ├── ProcessDayChangeQuarries() - Entry point after vanilla new-day quarry nodes spawn
+│   ├── ScanChestForQuarries() - Finds nearby/connected quarries from chest + conveyor networks
+│   ├── TryHarvestQuarryOutputsAt() - Collects spawned adjacent quarry nodes for a reachable quarry
+│   ├── Quarry break stagger helpers - Batch 5 quarries per chest, add 0.2s per batch before breaking
+│   ├── TryCaptureServerDrop() - Captures real vanilla quarry item drops during onDeathServer()
+│   ├── ShouldSuppressQuarryObjectDrop() - Blocks extra object-drop visuals during automated quarry harvest
+│   ├── HarvestQuarryNodeToStorage() - Plays death particles, runs vanilla onDeathServer(), clears tile, queues conveyor deposit
+│   └── CollectKnownQuarryNodeIds() - Builds the set of vanilla quarry node/barrel/bin tile IDs
 │
 ├── HarvestHelper (static class)
 │   ├── ProcessHarvestableMachines() - Entry point on day change
@@ -161,6 +186,8 @@ Autom8er namespace
 ├── ConveyorAnimator (static class)
 │   ├── ConveyorAnimation (inner class)
 │   │   └── Fields: visual, path, currentSegment, segmentProgress, onArrival, itemId, startDelay
+│   ├── ArcAnimation (inner class)
+│   │   └── Used by quarry item-pop visuals before conveyor deposit
 │   ├── FINAL_TILE_FRACTION = 0.1f — item travels 10% into destination tile
 │   ├── TileToWorld(x, y) - Convert tile coords to world position
 │   │   └── new Vector3(x*2, heightMap[x,y]+0.5, y*2) — NO centering offset
@@ -257,6 +284,30 @@ All conveyor transfers now show items visually sliding along the path. The syste
 - Items removed from source, deposited to destination instantly
 
 ### Day-Change Mega Arrays (single chest/crate support)
+
+### Quarry Auto-Harvest
+
+Autom8er now leaves vanilla quarry spawning alone and only automates the harvest/output part.
+
+How it works:
+1. Dinkum spawns the normal quarry outputs on sleep/day change.
+2. `NewDayHarvestPatch` waits for chunk refresh, then calls `QuarryHelper.ProcessDayChangeQuarries()`.
+3. The scan starts from normal output chests and connected conveyor networks. It does not do a global quarry scan.
+4. If a reachable quarry has spawned a valid vanilla quarry node on one of its 4 adjacent same-height tiles, Autom8er queues that node for harvest.
+5. Quarry break starts are staggered per destination chest: every 5 connected quarries add `+0.2s` before their break begins, with a `1.0s` initial delay before the first break wave.
+6. At break time, `HarvestQuarryNodeToStorage()` runs the node's real vanilla `onDeathServer()` path while temporary Harmony capture patches intercept the resulting `spawnAServerDrop()` calls.
+7. Each captured drop first plays a short arc from the broken node into the quarry tile, then uses the normal adjacent-chest or conveyor deposit logic.
+8. The quarry tile itself is the deposit origin, so any side of the quarry can connect to the chest/conveyor network.
+
+Rules that matter:
+- This system only harvests already-spawned vanilla quarry outputs. Autom8er does not create custom timed quarry spawns anymore.
+- The quarry must be reachable from a normal output chest directly or through a connected conveyor run.
+- Quarry nodes are only auto-harvested when the node tile is on the same elevation as the quarry tile, matching vanilla spawn rules.
+- Quarry break staggering is separate from item-transfer staggering. The break wave is throttled every 5 quarries to reduce block-break spikes on very large arrays.
+- Hidden treasure / detector `X` outcomes are not part of the auto-harvest node set and are left alone.
+- Quarry drops still use the normal storage routing rules: adjacent chest first, then conveyor path, then fallback chest search.
+- Layout rule: each quarry in an array needs its own valid adjacent spawn tiles. If two quarries are built so close that they compete for the same orthogonal spawn space, vanilla quarry spawning becomes ambiguous and that layout is not considered a supported automation pattern.
+- Safe layout rule: mirrored rows with a dedicated conveyor lane and separate spawn lanes per row work correctly. Opposing quarries that share a single middle spawn lane do not.
 
 Large bee hive / key cutter / worm farm / crab pot / pond / terrarium setups can now be driven from a single valid output chest:
 1. The scan still starts from chests, not from every machine on the map
@@ -736,7 +787,7 @@ Both are multi-tile objects. The search radius of 3 tiles (Manhattan distance) f
 - **`>= 0`**: TileObject ID (index into `WorldManager.Instance.allObjects[]`)
 
 ### 11. Day-Change Processing Needs Delay
-The `NewDayHarvestPatch` hooks into `refreshAllChunksNewDay()`, but chunk data isn't immediately available. A 2-second `WaitForSeconds` delay in the `DelayedHarvestProcessing` coroutine ensures tile data is loaded before scanning for harvestable machines and extractable pond/terrarium outputs.
+The `NewDayHarvestPatch` hooks into `refreshAllChunksNewDay()`, but chunk data isn't immediately available. A 2-second `WaitForSeconds` delay in the `DelayedHarvestProcessing` coroutine ensures tile data is loaded before scanning for harvestable machines, pond/terrarium outputs, and vanilla quarry outputs.
 
 ### 12. dropAnItem Creates Ghost Items From Update Context
 `WorldManager.Instance.dropAnItem()` creates physical items with DroppedItem/DroppedItemBounce components. When called from animation callbacks (which fire during Update), the resulting items can become ghost objects — visible but not properly networked, causing stuck items players can't pick up. Always use `FallbackDepositToAnyChest()` instead.
