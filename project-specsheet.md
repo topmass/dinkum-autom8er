@@ -1,7 +1,7 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** 1.5.2
+**Version:** 1.6.1
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
@@ -188,7 +188,7 @@ Autom8er namespace
 │   │   └── Fields: visual, path, currentSegment, segmentProgress, onArrival, itemId, startDelay
 │   ├── ArcAnimation (inner class)
 │   │   └── Used by quarry item-pop visuals before conveyor deposit
-│   ├── FINAL_TILE_FRACTION = 0.1f — item travels 10% into destination tile
+│   ├── FINAL_TILE_FRACTION = 0.3f — item travels 30% into destination tile
 │   ├── TileToWorld(x, y) - Convert tile coords to world position
 │   │   └── new Vector3(x*2, heightMap[x,y]+0.5, y*2) — NO centering offset
 │   ├── StartAnimation(itemId, amount, path, onArrival, delay=0)
@@ -263,7 +263,7 @@ All conveyor transfers now show items visually sliding along the path. The syste
 **ConveyorAnimator** — Manages visual item models sliding along paths:
 1. `StartAnimation()` instantiates the item's 3D prefab at 0.75 scale, disables physics
 2. `UpdateAnimations()` runs every frame — lerps position along path segments at `AnimationSpeed` tiles/sec
-3. `FINAL_TILE_FRACTION` (0.1) — item travels only 10% into the final destination tile before vanishing
+3. `FINAL_TILE_FRACTION` (0.3) — item travels 30% into the final destination tile before vanishing
 4. `startDelay` field — visual hidden until delay elapses (used for staggered silo bags and day-change mega-array batching)
 5. On arrival: executes deposit callback, destroys visual model
 
@@ -274,7 +274,7 @@ All conveyor transfers now show items visually sliding along the path. The syste
 - Used by: machines, crab pots, silos, fish ponds, terrariums, growth stages
 
 **Key constants:**
-- `FINAL_TILE_FRACTION = 0.1f` — 10% into destination tile
+- `FINAL_TILE_FRACTION = 0.3f` — 30% into destination tile
 - Item scale: `0.75f` (smaller than dropped items)
 - Tile-to-world: `new Vector3(x*2, heightMap[x,y]+0.5, y*2)` — matches game's `NetworkMapSharer` placement
 
@@ -702,6 +702,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
+- **1.6.1** - Fixed load-in catch-up processing so existing day-change outputs now run after loading into a save once the world, player, and chests are ready. Added fixed 1 second phasing between day-change harvest systems, quarry mining credit, and a subtle conveyor animation polish so items travel 30% into the destination tile before vanishing.
 - **1.5.2** - Large single-chest day-change arrays now scan through the full connected harvest network with no arbitrary connected-array/path scan cutoffs. Day-change conveyor launches are staggered in 100-item / 0.2s batches per destination chest so 1000+ machine arrays stay visual while reducing the launch spike.
 - **1.5.1** - Fixed player credit across all automation paths. Automated machine outputs now properly count for player progression when deposited into storage. Bee houses, key cutters, worm farms, crab pots, fish ponds, and bug terrariums also grant proper automation credit. Improved stability for large machine arrays.
 - **1.5.0** - Conveyor visual animations (items slide along paths, transfer on arrival), ConveyorPathfinder (BFS with parent tracking, multi-tile aware, distance-2 fallback), ConveyorAnimator (visual management, stagger/delay, reservation system), staggered silo bags (5 visible bags each carrying 2 items), FallbackDepositToAnyChest safety, SaveGameAnimationClearPatch, AnimationEnabled/AnimationSpeed config, SiloFillSpeed bumped to 10, stackable critters QoL (configurable), auto sorter first-load activation fix

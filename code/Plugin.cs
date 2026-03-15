@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.5.2")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.6.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -49,7 +49,22 @@ namespace Autom8er
         public static bool AnimationEnabled = true;
         public static float AnimationSpeed = 2f;
         public static bool StackableCritters = true;
+        private static bool loadCatchUpPending = false;
+        private static bool loadCatchUpCompletedForCurrentLoad = false;
+        private static float loadCatchUpNextAttemptAt = 0f;
+        private static int loadCatchUpAttempts = 0;
         private bool crittersPatched = false;
+
+        public static void QueueLoadCatchUp()
+        {
+            loadCatchUpPending = true;
+            loadCatchUpCompletedForCurrentLoad = false;
+            loadCatchUpAttempts = 0;
+            loadCatchUpNextAttemptAt = Time.realtimeSinceStartup + 8f;
+
+            if (Log != null)
+                Log.LogInfo("Autom8er: Queued load catch-up.");
+        }
 
         private void Awake()
         {
@@ -148,7 +163,7 @@ namespace Autom8er
             AnimationSpeed = Mathf.Clamp(configAnimationSpeed.Value, 0.5f, 10f);
             StackableCritters = configStackableCritters.Value;
 
-            Log.LogInfo("Autom8er v1.5.2 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
+            Log.LogInfo("Autom8er v1.6.1 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -185,6 +200,61 @@ namespace Autom8er
                 // Note: Harvest processing (bee houses, key cutters, worm farms, crab pots)
                 // is triggered by NewDayHarvestPatch after day change, not continuously
             }
+
+            if (!loadCatchUpCompletedForCurrentLoad &&
+                SaveLoad.saveOrLoad != null &&
+                SaveLoad.saveOrLoad.loadingComplete &&
+                NetworkMapSharer.Instance != null &&
+                NetworkMapSharer.Instance.localChar != null &&
+                !loadCatchUpPending)
+            {
+                loadCatchUpPending = true;
+                loadCatchUpNextAttemptAt = Time.realtimeSinceStartup + 2f;
+                loadCatchUpAttempts = 0;
+                Log.LogInfo("Autom8er: Load complete detected in Update, queuing catch-up.");
+            }
+
+            if (loadCatchUpPending)
+            {
+                TryStartQueuedLoadCatchUp();
+            }
+        }
+
+        private void TryStartQueuedLoadCatchUp()
+        {
+            if (Time.realtimeSinceStartup < loadCatchUpNextAttemptAt)
+                return;
+
+            if (SaveLoad.saveOrLoad == null || !SaveLoad.saveOrLoad.loadingComplete)
+            {
+                loadCatchUpNextAttemptAt = Time.realtimeSinceStartup + 2f;
+                return;
+            }
+
+            if (NetworkMapSharer.Instance == null || !NetworkMapSharer.Instance.isServer || NetworkMapSharer.Instance.localChar == null)
+            {
+                loadCatchUpNextAttemptAt = Time.realtimeSinceStartup + 2f;
+                return;
+            }
+
+            if (ContainerManager.manage == null)
+            {
+                loadCatchUpNextAttemptAt = Time.realtimeSinceStartup + 2f;
+                return;
+            }
+
+            if (ContainerManager.manage.activeChests.Count == 0 && loadCatchUpAttempts < 5)
+            {
+                loadCatchUpAttempts++;
+                loadCatchUpNextAttemptAt = Time.realtimeSinceStartup + 2f;
+                Log.LogInfo("Autom8er: Load catch-up waiting for active chests, retry " + loadCatchUpAttempts + ".");
+                return;
+            }
+
+            loadCatchUpPending = false;
+            loadCatchUpCompletedForCurrentLoad = true;
+            Log.LogInfo("Autom8er: Starting load catch-up harvest processing.");
+            StartCoroutine(NewDayHarvestPatch.RunPhasedHarvestProcessing(0f, "Autom8er: Processing load catch-up harvests...", "Autom8er: Load catch-up harvest processing complete"));
         }
 
         private void CacheConveyorTileType()
@@ -708,28 +778,12 @@ namespace Autom8er
             ConveyorAnimator.ClearAllAnimations();
             ConveyorHelper.ClearPendingSorts();
             QuarryHelper.ClearState();
+            Plugin.QueueLoadCatchUp();
         }
 
         static void Postfix()
         {
-            if (NetworkMapSharer.Instance != null && NetworkMapSharer.Instance.isServer && WorldManager.Instance != null)
-            {
-                WorldManager.Instance.StartCoroutine(DelayedInitialQuarryCatchUp());
-            }
-        }
-
-        private static System.Collections.IEnumerator DelayedInitialQuarryCatchUp()
-        {
-            yield return new WaitForSeconds(6f);
-
-            if (NetworkMapSharer.Instance == null || !NetworkMapSharer.Instance.isServer || WorldManager.Instance == null)
-                yield break;
-
-            int quarryCount = QuarryHelper.ProcessDayChangeQuarries();
-            if (quarryCount > 0)
-            {
-                Plugin.Log.LogInfo("Autom8er: Post-load quarry catch-up scheduled " + quarryCount + " quarry groups.");
-            }
+            Plugin.QueueLoadCatchUp();
         }
     }
 
@@ -749,22 +803,25 @@ namespace Autom8er
             if (NetworkMapSharer.Instance.isServer)
             {
                 // Use a coroutine to delay harvest processing until chunks are refreshed
-                WorldManager.Instance.StartCoroutine(DelayedHarvestProcessing());
+                WorldManager.Instance.StartCoroutine(RunPhasedHarvestProcessing(2f, "Autom8er: Processing day-change harvests...", "Autom8er: Day-change harvest processing complete"));
             }
         }
 
-        private static System.Collections.IEnumerator DelayedHarvestProcessing()
+        public static System.Collections.IEnumerator RunPhasedHarvestProcessing(float initialDelay, string startLog, string endLog)
         {
-            // Wait a bit for chunk refreshes to complete
-            yield return new UnityEngine.WaitForSeconds(2f);
+            if (initialDelay > 0f)
+                yield return new UnityEngine.WaitForSeconds(initialDelay);
 
-            Plugin.Log.LogInfo("Autom8er: Processing day-change harvests...");
+            if (NetworkMapSharer.Instance == null || !NetworkMapSharer.Instance.isServer || WorldManager.Instance == null)
+                yield break;
+
+            Plugin.Log.LogInfo(startLog);
             HarvestHelper.ProcessHarvestableMachines();
             yield return new WaitForSeconds(DAY_CHANGE_PHASE_DELAY_SECONDS);
             FishPondHelper.ProcessPondAndTerrariumOutput();
             yield return new WaitForSeconds(DAY_CHANGE_PHASE_DELAY_SECONDS);
             QuarryHelper.ProcessDayChangeQuarries();
-            Plugin.Log.LogInfo("Autom8er: Day-change harvest processing complete");
+            Plugin.Log.LogInfo(endLog);
         }
     }
 
@@ -3056,8 +3113,8 @@ namespace Autom8er
             return new Vector3(worldX, worldY, worldZ);
         }
 
-        // Item travels 10% into the destination tile before vanishing
-        private const float FINAL_TILE_FRACTION = 0.1f;
+        // Item travels 30% into the destination tile before vanishing
+        private const float FINAL_TILE_FRACTION = 0.3f;
 
         public static void StartAnimation(int itemId, int stackAmount, List<Vector2Int> path, System.Action onArrival, float delay = 0f)
         {
