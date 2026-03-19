@@ -1,7 +1,7 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** 1.6.1
+**Version:** main (post-1.6.1)
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
@@ -133,6 +133,7 @@ Autom8er namespace
 │   └── Prefix on SaveLoad.loadOverFrames()
 │       - Clears pendingSorts (stale coroutine refs from previous session)
 │       - Clears all animations
+│       - Clears filter distribution cursors
 │       - Clears quarry runtime state
 │
 ├── QuarryHelper (static class)
@@ -169,11 +170,14 @@ Autom8er namespace
 │   ├── TryDepositViaConveyorPath() - Machine → path → routed destination (animated)
 │   │   └── Arrival callback: deposit or FallbackDepositToAnyChest if full
 │   ├── FallbackDepositToAnyChest() - BFS fallback when intended dest unavailable
+│   ├── CollectFilterDestinationsFromNetworkAnchor() - Gathers all same-item black filter destinations on a connected network
+│   ├── TryChooseBalancedFilterDestination() - Stable round-robin selection across a filter group
+│   ├── ClearFilterDistributionState() - Reset splitter cursors on save/load
 │   ├── IsConveyorTile() - Check if tile is conveyor path
 │   ├── IsInputOnlyContainer() - Check for white crate/chest
 │   ├── IsFilterCrate() - Check for black crates
 │   ├── IsSpecialContainer() - Exclude fish ponds, terrariums, auto placers, etc.
-│   ├── TryFindBestOutputDestinationFromNetworkAnchor() - Matching filter route, then matching stack, then empty chest
+│   ├── TryFindBestOutputDestinationFromNetworkAnchor() - Balanced filter route, then matching stack, then empty chest
 │   ├── TryFindFilterDestinationFromCrate() - Resolve a black crate's touching storage chest
 │   ├── FindChestAt() - Get Chest object at position
 │   │   └── Filters out tileObjectItemChanger (gacha machines, etc.)
@@ -248,15 +252,15 @@ Autom8er namespace
 │   ├── Green crates only
 │   ├── ProcessDayChangeVacuumHarvests() - Day-change crop/tree harvest wave runner
 │   ├── TryVacuumNearbyDrops() - Suck nearby drops into the crate, then route them onward
-│   ├── TryFlushStoredItemsToNetwork() - Push items back out of the green crate into the network
+│   ├── TryFlushStoredItemsToNetwork() - Push one grouped chunk back out of the green crate per scan pass
 │   └── Uses routed output destinations, so filtered black-crate routes outrank generic storage
 │
 ├── FilterCrateHelper (static class)
 │   ├── Black crates only
-│   ├── TryPullFilteredItemsFromNetwork() - Keeps one sample item, pulls matching items from connected source chests
+│   ├── TryPullFilteredItemsFromNetwork() - Keeps one sample item, pulls one grouped chunk from connected source chests per scan pass
 │   ├── FindSourcePull() - BFS the connected conveyor network for a valid source chest
 │   ├── Uses the black crate tile as the conveyor arrival point
-│   └── Deposits into the regular chest touching the black crate
+│   └── Deposits into the regular chest touching the black crate, using the shared filter splitter
 │
 └── FishPondHelper (static class)
     ├── TryFeedPondsAndTerrariums() - Entry point (outdoor only, 3-tile radius)
@@ -479,6 +483,10 @@ Same architecture as fish ponds but:
 - Matching items first route to a black crate filter destination before ordinary matching-stack chests
 - The real storage is the regular chest touching that black crate
 - Conveyor visuals end on the black crate tile, then the item is deposited into the touching storage chest
+- If multiple black crates on the same connected network filter the same item, Autom8er round-robins across them instead of always picking the first one found
+- That splitter applies both to normal routed outputs and to the black crate's own active pull behavior, so trickle inputs and large dumps both distribute across the same filter group
+- Filter pulls now use the same cadence model as the rest of Autom8er belts: one grouped chunk per scan pass instead of burst-scheduling a whole source stack
+- Stackable filter pulls still animate in `10`-item chunks, so the belts stay readable without changing final totals
 - The black crate never pulls back out of its own touching destination chest
 - Durability items in a black crate are filter keys only. Their durability value is preserved and not normalized
 
@@ -487,6 +495,8 @@ Same architecture as fish ponds but:
 - Day-change harvests break in waves of 5 tiles with a 0.2s delay between waves
 - Multi-yield crop/tree drops are grouped so only one conveyor visual is shown per harvested tile/item group
 - Vacuumed items route through the connected network using the same destination priority as other outputs, so filter crates can sort vacuum harvests too
+- Vacuum crate exports now use the scan loop as pacing: one grouped chunk per scan pass, with a small short-stack buffer before flushing
+- This keeps mixed-item orchard or farm harvests from flooding the belt with same-frame bursts
 
 ### Stackable Critters (v1.5.0)
 On first `Update()` tick, `ApplyStackableCritters()` iterates all `Inventory.Instance.allItems` and sets `isStackable = true` on any item with `underwaterCreature` set. This directly modifies the item data — no Harmony patch needed. Works everywhere including the 2 places in `Inventory.cs` that check the `isStackable` field directly (UI stacking logic). Config `StackableCritters = false` skips the modification entirely (vanilla behavior). Fish pond feeding is unaffected — our code already takes exactly 1 critter per feeding cycle regardless of stack size.
@@ -742,6 +752,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
+- **Current `main` (unversioned after 1.6.1)** - Green vacuum crates harvest crops/trees and vacuum nearby drops into routed conveyor networks. Black crates act as filter heads with touching storage chests, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Vacuum and filter exports now emit grouped chunks per scan pass instead of local burst scheduling.
 - **1.6.1** - Fixed load-in catch-up processing so existing day-change outputs now run after loading into a save once the world, player, and chests are ready. Added fixed 1 second phasing between day-change harvest systems, quarry mining credit, and a subtle conveyor animation polish so items travel 30% into the destination tile before vanishing.
 - **1.5.2** - Large single-chest day-change arrays now scan through the full connected harvest network with no arbitrary connected-array/path scan cutoffs. Day-change conveyor launches are staggered in 100-item / 0.2s batches per destination chest so 1000+ machine arrays stay visual while reducing the launch spike.
 - **1.5.1** - Fixed player credit across all automation paths. Automated machine outputs now properly count for player progression when deposited into storage. Bee houses, key cutters, worm farms, crab pots, fish ponds, and bug terrariums also grant proper automation credit. Improved stability for large machine arrays.
@@ -755,7 +766,32 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 
 ---
 
-## Learnings — Game Mechanics & Gotchas
+## Learnings
+
+### Use One Belt Cadence Everywhere
+Whenever a new feature pushes items onto conveyors, the safest visual rule is to reuse the main Autom8er scan cadence instead of inventing a local burst loop.
+
+Rules:
+1. Prefer one grouped transfer per scan pass over scheduling many same-frame animations.
+2. Group stackable transfers before animating them so totals stay correct but the belt remains readable.
+3. If a system feels visually worse than chest-to-machine loading, it is probably bypassing the scan-loop cadence.
+
+### Splitters Need One Shared Stable Order
+Round-robin splitting only works if every caller sees the same destination order for the same filter group.
+
+Rules:
+1. Collect all matching filter destinations on the connected network before choosing one.
+2. Sort the group into one stable order before applying the shared cursor.
+3. Clear splitter cursors on save/load so stale routing order does not leak across sessions.
+
+### Filter Crates Are Routing Heads, Not Bulk Storage
+Black crates should define routing, not become another storage layer that accumulates bulk items.
+
+Rules:
+1. The black crate keeps the sample item only.
+2. The touching regular chest is the real storage destination.
+3. The filter crate must never pull back out of its own touching destination chest.
+4. Durability items in the black crate are filter keys only and must never be normalized or duplicated.
 
 ### Automation Credit Must Be Granted On Successful Deposit
 Vanilla standard machines often get visible progression through a dropped-item path: machine output becomes a world drop, then the player picks it up, and the pickup applies end-of-day tally. Autom8er bypasses that whenever it routes output directly into storage. For reliable credit, award progression when the automated deposit actually succeeds, including fallback chest reroutes.
@@ -785,8 +821,6 @@ Rules:
 1. Pathfinding should only walk connected conveyor tiles, not the full map blindly.
 2. Connected-network traversal should stop because there are no more connected conveyor/machine tiles, not because an arbitrary step counter expired.
 3. Missing visuals with correct final item totals usually means pathfinding failed and the instant deposit fallback ran.
-
-Things discovered during development that are important for future work on this mod.
 
 ### 1. `underwaterCreature` is a Reference Type (Unity Implicit Bool)
 `InventoryItem.underwaterCreature` is NOT a boolean — it's a reference to a Unity object. In C#/Unity, checking `if (item.underwaterCreature)` works because Unity overrides the implicit bool operator for UnityEngine.Object. If the reference is null/destroyed, it's falsy; if it exists, it's truthy. Do NOT compare it to `true`/`false` directly — use the implicit bool pattern.

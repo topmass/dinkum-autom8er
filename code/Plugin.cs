@@ -829,6 +829,7 @@ namespace Autom8er
         static void Prefix()
         {
             ConveyorAnimator.ClearAllAnimations();
+            ConveyorHelper.ClearFilterDistributionState();
             QuarryHelper.ClearState();
         }
     }
@@ -842,6 +843,7 @@ namespace Autom8er
         {
             ConveyorAnimator.ClearAllAnimations();
             ConveyorHelper.ClearPendingSorts();
+            ConveyorHelper.ClearFilterDistributionState();
             QuarryHelper.ClearState();
             Plugin.QueueLoadCatchUp();
         }
@@ -1975,6 +1977,16 @@ namespace Autom8er
     {
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
+        private static readonly Dictionary<string, int> filterDistributionCursor = new Dictionary<string, int>();
+
+        private sealed class DestinationSearchState
+        {
+            public readonly List<OutputDestination> filterDestinations = new List<OutputDestination>();
+            public readonly HashSet<long> seenFilters = new HashSet<long>();
+            public readonly HashSet<long> seenChests = new HashSet<long>();
+            public OutputDestination firstMatchingDestination;
+            public OutputDestination firstEmptyDestination;
+        }
 
         public class OutputDestination
         {
@@ -2373,9 +2385,7 @@ namespace Autom8er
             if (itemId < 0)
                 return false;
 
-            OutputDestination firstMatchingDestination = null;
-            OutputDestination firstEmptyDestination = null;
-            HashSet<long> seenChests = new HashSet<long>();
+            DestinationSearchState state = new DestinationSearchState();
 
             for (int radius = 1; radius <= searchRadius; radius++)
             {
@@ -2398,17 +2408,13 @@ namespace Autom8er
                         if (checkX < 0 || checkY < 0)
                             continue;
 
-                        if (TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates: false, seenChests, ref firstMatchingDestination, ref firstEmptyDestination, out bestDestination))
-                            return true;
+                        TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates: false, state);
                     }
                 }
             }
 
-            if (firstMatchingDestination != null || firstEmptyDestination != null)
-            {
-                bestDestination = firstMatchingDestination ?? firstEmptyDestination;
+            if (TryFinishDestinationSearch(state, itemId, inside, advanceFilterCursor: true, out bestDestination))
                 return true;
-            }
 
             return TryFindBestConveyorOutputDestinationFromRadius(originX, originY, inside, itemId, searchRadius, out bestDestination);
         }
@@ -2422,18 +2428,13 @@ namespace Autom8er
             }
 
             bestDestination = null;
-            OutputDestination firstMatchingDestination = null;
-            OutputDestination firstEmptyDestination = null;
-            HashSet<long> seenChests = new HashSet<long>();
+            DestinationSearchState state = new DestinationSearchState();
 
-            if (includeAnchorChest && TryGetBestDestinationAt(anchorChest.xPos, anchorChest.yPos, inside, itemId, excludeVacuumCrates, seenChests, ref firstMatchingDestination, ref firstEmptyDestination, out bestDestination))
-                return true;
+            if (includeAnchorChest)
+                TryGetBestDestinationAt(anchorChest.xPos, anchorChest.yPos, inside, itemId, excludeVacuumCrates, state);
 
             if (Plugin.ConveyorTileType == -1)
-            {
-                bestDestination = firstMatchingDestination ?? firstEmptyDestination;
-                return bestDestination != null;
-            }
+                return TryFinishDestinationSearch(state, itemId, inside, advanceFilterCursor: true, out bestDestination);
 
             HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
             Queue<Vector2Int> toExplore = new Queue<Vector2Int>();
@@ -2470,8 +2471,7 @@ namespace Autom8er
                     if (pathNetwork.Contains(checkPos))
                         continue;
 
-                    if (TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates, seenChests, ref firstMatchingDestination, ref firstEmptyDestination, out bestDestination))
-                        return true;
+                    TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates, state);
                 }
 
                 for (int i = 0; i < 4; i++)
@@ -2494,8 +2494,7 @@ namespace Autom8er
                 }
             }
 
-            bestDestination = firstMatchingDestination ?? firstEmptyDestination;
-            return bestDestination != null;
+            return TryFinishDestinationSearch(state, itemId, inside, advanceFilterCursor: true, out bestDestination);
         }
 
         public static bool TryFindBestAdjacentOutputDestination(int originX, int originY, HouseDetails inside, int itemId, out OutputDestination bestDestination)
@@ -2504,9 +2503,7 @@ namespace Autom8er
             if (itemId < 0)
                 return false;
 
-            OutputDestination firstMatchingDestination = null;
-            OutputDestination firstEmptyDestination = null;
-            HashSet<long> seenChests = new HashSet<long>();
+            DestinationSearchState state = new DestinationSearchState();
 
             for (int i = 0; i < 4; i++)
             {
@@ -2516,12 +2513,10 @@ namespace Autom8er
                 if (checkX < 0 || checkY < 0)
                     continue;
 
-                if (TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates: false, seenChests, ref firstMatchingDestination, ref firstEmptyDestination, out bestDestination))
-                    return true;
+                TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates: false, state);
             }
 
-            bestDestination = firstMatchingDestination ?? firstEmptyDestination;
-            return bestDestination != null;
+            return TryFinishDestinationSearch(state, itemId, inside, advanceFilterCursor: true, out bestDestination);
         }
 
         public static bool TryFindBestConveyorOutputDestination(int originX, int originY, HouseDetails inside, int itemId, out OutputDestination bestDestination)
@@ -2555,9 +2550,7 @@ namespace Autom8er
             if (pathNetwork.Count == 0)
                 return false;
 
-            OutputDestination firstMatchingDestination = null;
-            OutputDestination firstEmptyDestination = null;
-            HashSet<long> seenChests = new HashSet<long>();
+            DestinationSearchState state = new DestinationSearchState();
 
             while (toExplore.Count > 0)
             {
@@ -2575,8 +2568,7 @@ namespace Autom8er
                     if (pathNetwork.Contains(checkPos) || (checkX == originX && checkY == originY))
                         continue;
 
-                    if (TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates: false, seenChests, ref firstMatchingDestination, ref firstEmptyDestination, out bestDestination))
-                        return true;
+                    TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates: false, state);
                 }
 
                 for (int i = 0; i < 4; i++)
@@ -2599,8 +2591,7 @@ namespace Autom8er
                 }
             }
 
-            bestDestination = firstMatchingDestination ?? firstEmptyDestination;
-            return bestDestination != null;
+            return TryFinishDestinationSearch(state, itemId, inside, advanceFilterCursor: true, out bestDestination);
         }
 
         private static bool TryFindBestConveyorOutputDestinationFromRadius(int originX, int originY, HouseDetails inside, int itemId, int startRadius, out OutputDestination bestDestination)
@@ -2639,9 +2630,7 @@ namespace Autom8er
             if (pathNetwork.Count == 0)
                 return false;
 
-            OutputDestination firstMatchingDestination = null;
-            OutputDestination firstEmptyDestination = null;
-            HashSet<long> seenChests = new HashSet<long>();
+            DestinationSearchState state = new DestinationSearchState();
 
             while (toExplore.Count > 0)
             {
@@ -2658,8 +2647,7 @@ namespace Autom8er
                     if (pathNetwork.Contains(checkPos) || (checkX == originX && checkY == originY))
                         continue;
 
-                    if (TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates: false, seenChests, ref firstMatchingDestination, ref firstEmptyDestination, out bestDestination))
-                        return true;
+                    TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates: false, state);
                 }
 
                 for (int i = 0; i < 4; i++)
@@ -2681,42 +2669,158 @@ namespace Autom8er
                 }
             }
 
-            bestDestination = firstMatchingDestination ?? firstEmptyDestination;
-            return bestDestination != null;
+            return TryFinishDestinationSearch(state, itemId, inside, advanceFilterCursor: true, out bestDestination);
         }
 
-        private static bool TryGetBestDestinationAt(int checkX, int checkY, HouseDetails inside, int itemId, bool excludeVacuumCrates, HashSet<long> seenChests, ref OutputDestination firstMatchingDestination, ref OutputDestination firstEmptyDestination, out OutputDestination immediateFilterDestination)
+        public static List<OutputDestination> CollectFilterDestinationsFromNetworkAnchor(Chest anchorChest, HouseDetails inside, int itemId, bool includeAnchorChest)
         {
-            immediateFilterDestination = null;
+            DestinationSearchState state = new DestinationSearchState();
+            if (anchorChest == null || itemId < 0)
+                return state.filterDestinations;
 
-            OutputDestination filterDestination;
-            if (TryGetFilterDestinationAt(checkX, checkY, inside, itemId, out filterDestination))
+            if (includeAnchorChest)
+                TryCollectFilterDestinationAt(anchorChest.xPos, anchorChest.yPos, inside, itemId, state);
+
+            if (Plugin.ConveyorTileType == -1)
+                return state.filterDestinations;
+
+            HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
+            Queue<Vector2Int> toExplore = new Queue<Vector2Int>();
+
+            for (int i = 0; i < 4; i++)
             {
-                immediateFilterDestination = filterDestination;
-                return true;
+                int checkX = anchorChest.xPos + dx[i];
+                int checkY = anchorChest.yPos + dy[i];
+
+                if (checkX < 0 || checkY < 0)
+                    continue;
+
+                if (!IsConveyorTile(checkX, checkY, inside))
+                    continue;
+
+                Vector2Int pos = new Vector2Int(checkX, checkY);
+                if (pathNetwork.Add(pos))
+                    toExplore.Enqueue(pos);
             }
 
-            if (IsInputOnlyContainer(checkX, checkY, inside) || IsSpecialContainer(checkX, checkY, inside) || IsFilterCrate(checkX, checkY, inside))
+            while (toExplore.Count > 0)
+            {
+                Vector2Int current = toExplore.Dequeue();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int checkX = current.x + dx[i];
+                    int checkY = current.y + dy[i];
+
+                    if (checkX < 0 || checkY < 0)
+                        continue;
+
+                    Vector2Int checkPos = new Vector2Int(checkX, checkY);
+                    if (pathNetwork.Contains(checkPos))
+                        continue;
+
+                    TryCollectFilterDestinationAt(checkX, checkY, inside, itemId, state);
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nextX = current.x + dx[i];
+                    int nextY = current.y + dy[i];
+
+                    if (nextX < 0 || nextY < 0)
+                        continue;
+
+                    Vector2Int nextPos = new Vector2Int(nextX, nextY);
+                    if (pathNetwork.Contains(nextPos))
+                        continue;
+
+                    if (IsConveyorTile(nextX, nextY, inside))
+                    {
+                        pathNetwork.Add(nextPos);
+                        toExplore.Enqueue(nextPos);
+                    }
+                }
+            }
+
+            return state.filterDestinations;
+        }
+
+        public static bool TryChooseBalancedFilterDestination(List<OutputDestination> filterDestinations, int itemId, HouseDetails inside, bool advanceCursor, out OutputDestination destination)
+        {
+            destination = null;
+            if (filterDestinations == null || filterDestinations.Count == 0)
                 return false;
+
+            SortFilterDestinations(filterDestinations);
+
+            string key = BuildFilterDistributionKey(filterDestinations, itemId, inside);
+            int cursor;
+            if (!filterDistributionCursor.TryGetValue(key, out cursor))
+                cursor = 0;
+
+            int index = Mathf.Abs(cursor) % filterDestinations.Count;
+            destination = filterDestinations[index];
+
+            if (advanceCursor)
+                filterDistributionCursor[key] = (index + 1) % filterDestinations.Count;
+
+            return true;
+        }
+
+        public static void AdvanceFilterDistributionCursor(List<OutputDestination> filterDestinations, int itemId, HouseDetails inside)
+        {
+            if (filterDestinations == null || filterDestinations.Count == 0)
+                return;
+
+            SortFilterDestinations(filterDestinations);
+
+            string key = BuildFilterDistributionKey(filterDestinations, itemId, inside);
+            int cursor;
+            if (!filterDistributionCursor.TryGetValue(key, out cursor))
+                cursor = 0;
+
+            filterDistributionCursor[key] = (Mathf.Abs(cursor) + 1) % filterDestinations.Count;
+        }
+
+        public static void ClearFilterDistributionState()
+        {
+            filterDistributionCursor.Clear();
+        }
+
+        private static bool TryFinishDestinationSearch(DestinationSearchState state, int itemId, HouseDetails inside, bool advanceFilterCursor, out OutputDestination destination)
+        {
+            if (TryChooseBalancedFilterDestination(state.filterDestinations, itemId, inside, advanceFilterCursor, out destination))
+                return true;
+
+            destination = state.firstMatchingDestination ?? state.firstEmptyDestination;
+            return destination != null;
+        }
+
+        private static void TryGetBestDestinationAt(int checkX, int checkY, HouseDetails inside, int itemId, bool excludeVacuumCrates, DestinationSearchState state)
+        {
+            TryCollectFilterDestinationAt(checkX, checkY, inside, itemId, state);
+
+            if (IsInputOnlyContainer(checkX, checkY, inside) || IsSpecialContainer(checkX, checkY, inside) || IsFilterCrate(checkX, checkY, inside))
+                return;
 
             Chest chest = FindChestAt(checkX, checkY, inside);
             if (chest == null)
-                return false;
+                return;
 
             if (excludeVacuumCrates && IsVacuumCrate(checkX, checkY, inside))
-                return false;
+                return;
 
             long chestKey = (((long)chest.xPos & 0xFFFFFL) << 44)
                 | (((long)chest.yPos & 0xFFFFFL) << 24)
                 | (((long)(chest.insideX + 1) & 0xFFFL) << 12)
                 | ((long)(chest.insideY + 1) & 0xFFFL);
 
-            if (!seenChests.Add(chestKey))
-                return false;
+            if (!state.seenChests.Add(chestKey))
+                return;
 
             int slotIndex = FindSlotForItem(chest, itemId);
             if (slotIndex == -1)
-                return false;
+                return;
 
             OutputDestination destination = new OutputDestination
             {
@@ -2728,15 +2832,62 @@ namespace Autom8er
 
             if (ChestHasMatchingStack(chest, itemId))
             {
-                if (firstMatchingDestination == null)
-                    firstMatchingDestination = destination;
-                return false;
+                if (state.firstMatchingDestination == null)
+                    state.firstMatchingDestination = destination;
+                return;
             }
 
-            if (firstEmptyDestination == null)
-                firstEmptyDestination = destination;
+            if (state.firstEmptyDestination == null)
+                state.firstEmptyDestination = destination;
+        }
 
-            return false;
+        private static void TryCollectFilterDestinationAt(int filterX, int filterY, HouseDetails inside, int itemId, DestinationSearchState state)
+        {
+            OutputDestination filterDestination;
+            if (!TryGetFilterDestinationAt(filterX, filterY, inside, itemId, out filterDestination))
+                return;
+
+            long filterKey = (((long)filterDestination.routeX & 0xFFFFFL) << 44)
+                | (((long)filterDestination.routeY & 0xFFFFFL) << 24)
+                | (((long)((inside != null ? inside.xPos : -1) + 1) & 0xFFFL) << 12)
+                | ((long)((inside != null ? inside.yPos : -1) + 1) & 0xFFFL);
+
+            if (!state.seenFilters.Add(filterKey))
+                return;
+
+            state.filterDestinations.Add(filterDestination);
+        }
+
+        private static string BuildFilterDistributionKey(List<OutputDestination> filterDestinations, int itemId, HouseDetails inside)
+        {
+            List<string> routeParts = new List<string>(filterDestinations.Count);
+            for (int i = 0; i < filterDestinations.Count; i++)
+            {
+                OutputDestination destination = filterDestinations[i];
+                routeParts.Add(destination.routeX + "," + destination.routeY);
+            }
+
+            routeParts.Sort();
+
+            string insideKey = inside != null ? (inside.xPos + "," + inside.yPos) : "world";
+            return insideKey + "|" + itemId + "|" + string.Join(";", routeParts.ToArray());
+        }
+
+        private static void SortFilterDestinations(List<OutputDestination> filterDestinations)
+        {
+            filterDestinations.Sort((a, b) =>
+            {
+                if (a.routeX != b.routeX)
+                    return a.routeX.CompareTo(b.routeX);
+
+                if (a.routeY != b.routeY)
+                    return a.routeY.CompareTo(b.routeY);
+
+                if (a.chest.xPos != b.chest.xPos)
+                    return a.chest.xPos.CompareTo(b.chest.xPos);
+
+                return a.chest.yPos.CompareTo(b.chest.yPos);
+            });
         }
 
         private static bool TryGetFilterDestinationAt(int filterX, int filterY, HouseDetails inside, int itemId, out OutputDestination destination)
@@ -4238,9 +4389,6 @@ namespace Autom8er
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
         private const int TRANSFER_STACK_CHUNK_SIZE = 10;
-        private const float TRANSFER_CHUNK_DELAY = 0.03f;
-        private const int LARGE_BACKLOG_THRESHOLD = 1000;
-        private const int LARGE_BACKLOG_TRANSFER_PER_PASS = 100;
 
         private class SourcePull
         {
@@ -4267,9 +4415,13 @@ namespace Autom8er
                     continue;
 
                 bool isFuelItem = Inventory.Instance.allItems[itemId].hasFuel;
+                List<ConveyorHelper.OutputDestination> filterDestinations = ConveyorHelper.CollectFilterDestinationsFromNetworkAnchor(filterChest, inside, itemId, includeAnchorChest: true);
 
                 ConveyorHelper.OutputDestination destination;
-                if (!ConveyorHelper.TryFindFilterDestinationFromCrate(filterChest, inside, itemId, out destination))
+                if (!ConveyorHelper.TryChooseBalancedFilterDestination(filterDestinations, itemId, inside, advanceCursor: false, out destination))
+                    continue;
+
+                if (destination.routeX != filterChest.xPos || destination.routeY != filterChest.yPos)
                     continue;
 
                 if (!isFuelItem && stackAmount > 1)
@@ -4281,58 +4433,41 @@ namespace Autom8er
                     }
                 }
 
-                List<SourcePull> pulls = FindSourcePulls(filterChest, inside, itemId, destination.chest);
-                if (pulls == null || pulls.Count == 0)
+                SourcePull pull = FindSourcePull(filterChest, inside, itemId, destination.chest);
+                if (pull == null)
                     continue;
 
-                float delay = 0f;
+                RemoveFromSourceChest(pull.sourceChest, pull.sourceSlot, itemId, pull.moveAmount, inside);
 
-                for (int pullIndex = 0; pullIndex < pulls.Count; pullIndex++)
+                Chest capturedSourceChest = pull.sourceChest;
+                int capturedItemId = itemId;
+                int capturedAmount = pull.moveAmount;
+                Chest capturedDestinationChest = destination.chest;
+                int capturedRouteX = destination.routeX;
+                int capturedRouteY = destination.routeY;
+
+                System.Action depositFiltered = () =>
                 {
-                    SourcePull pull = pulls[pullIndex];
-                    RemoveFromSourceChest(pull.sourceChest, pull.sourceSlot, itemId, pull.moveAmount, inside);
+                    if (HarvestHelper.TryDepositHarvestToChest(capturedDestinationChest, inside, capturedItemId, capturedAmount))
+                        return;
 
-                    Chest capturedSourceChest = pull.sourceChest;
-                    int capturedItemId = itemId;
-                    int capturedAmount = pull.moveAmount;
-                    Chest capturedDestinationChest = destination.chest;
-                    int capturedRouteX = destination.routeX;
-                    int capturedRouteY = destination.routeY;
+                    if (ConveyorHelper.FallbackDepositToAnyChest(capturedDestinationChest.xPos, capturedDestinationChest.yPos, inside, capturedItemId, capturedAmount))
+                        return;
 
-                    int remainingToSend = capturedAmount;
-                    int chunkSize = GetTransferChunkSize(capturedItemId);
+                    HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedAmount);
+                };
 
-                    while (remainingToSend > 0)
-                    {
-                        int chunkAmount = Mathf.Min(chunkSize, remainingToSend);
-                        int capturedChunkAmount = chunkAmount;
+                ConveyorAnimator.AnimateTransfer(capturedItemId, capturedAmount,
+                    new Vector2Int(capturedSourceChest.xPos, capturedSourceChest.yPos),
+                    new Vector2Int(capturedRouteX, capturedRouteY),
+                    inside, depositFiltered);
 
-                        System.Action depositFiltered = () =>
-                        {
-                            if (HarvestHelper.TryDepositHarvestToChest(capturedDestinationChest, inside, capturedItemId, capturedChunkAmount))
-                                return;
-
-                            if (ConveyorHelper.FallbackDepositToAnyChest(capturedDestinationChest.xPos, capturedDestinationChest.yPos, inside, capturedItemId, capturedChunkAmount))
-                                return;
-
-                            HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedChunkAmount);
-                        };
-
-                        ConveyorAnimator.AnimateTransfer(capturedItemId, capturedChunkAmount,
-                            new Vector2Int(capturedSourceChest.xPos, capturedSourceChest.yPos),
-                            new Vector2Int(capturedRouteX, capturedRouteY),
-                            inside, depositFiltered, delay);
-
-                        delay += TRANSFER_CHUNK_DELAY;
-                        remainingToSend -= chunkAmount;
-                    }
-                }
-
+                ConveyorHelper.AdvanceFilterDistributionCursor(filterDestinations, itemId, inside);
                 return;
             }
         }
 
-        private static List<SourcePull> FindSourcePulls(Chest filterChest, HouseDetails inside, int itemId, Chest destinationChest)
+        private static SourcePull FindSourcePull(Chest filterChest, HouseDetails inside, int itemId, Chest destinationChest)
         {
             if (Plugin.ConveyorTileType == -1)
                 return null;
@@ -4340,10 +4475,6 @@ namespace Autom8er
             HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
             Queue<Vector2Int> toExplore = new Queue<Vector2Int>();
             HashSet<long> seenChests = new HashSet<long>();
-            SourcePull firstPull = null;
-            List<SourcePull> backlogPulls = null;
-            int totalAvailable = 0;
-            int plannedBacklogAmount = 0;
 
             for (int i = 0; i < 4; i++)
             {
@@ -4408,62 +4539,16 @@ namespace Autom8er
                         if (chest.itemIds[slot] != itemId || chest.itemStacks[slot] <= 0)
                             continue;
 
-                        int moveAmount = GetTransferAmount(chest, slot, itemId);
+                        int moveAmount = Mathf.Min(GetTransferChunkSize(itemId), GetTransferAmount(chest, slot, itemId));
                         if (moveAmount <= 0)
                             continue;
 
-                        totalAvailable += moveAmount;
-
-                        SourcePull pull = new SourcePull
+                        return new SourcePull
                         {
                             sourceChest = chest,
                             sourceSlot = slot,
                             moveAmount = moveAmount
                         };
-
-                        if (firstPull == null)
-                            firstPull = pull;
-
-                        if (totalAvailable > LARGE_BACKLOG_THRESHOLD)
-                        {
-                            if (backlogPulls == null)
-                            {
-                                backlogPulls = new List<SourcePull>();
-
-                                if (firstPull != null)
-                                {
-                                    int firstPullAmount = Mathf.Min(firstPull.moveAmount, LARGE_BACKLOG_TRANSFER_PER_PASS);
-                                    backlogPulls.Add(new SourcePull
-                                    {
-                                        sourceChest = firstPull.sourceChest,
-                                        sourceSlot = firstPull.sourceSlot,
-                                        moveAmount = firstPullAmount
-                                    });
-                                    plannedBacklogAmount += firstPullAmount;
-                                }
-                            }
-
-                            if (!(firstPull != null &&
-                                  firstPull.sourceChest == pull.sourceChest &&
-                                  firstPull.sourceSlot == pull.sourceSlot))
-                            {
-                                int remainingBudget = LARGE_BACKLOG_TRANSFER_PER_PASS - plannedBacklogAmount;
-                                if (remainingBudget > 0)
-                                {
-                                    int backlogAmount = Mathf.Min(moveAmount, remainingBudget);
-                                    backlogPulls.Add(new SourcePull
-                                    {
-                                        sourceChest = pull.sourceChest,
-                                        sourceSlot = pull.sourceSlot,
-                                        moveAmount = backlogAmount
-                                    });
-                                    plannedBacklogAmount += backlogAmount;
-                                }
-                            }
-
-                            if (plannedBacklogAmount >= LARGE_BACKLOG_TRANSFER_PER_PASS)
-                                return backlogPulls;
-                        }
                     }
                 }
 
@@ -4486,12 +4571,6 @@ namespace Autom8er
                     }
                 }
             }
-
-            if (backlogPulls != null && backlogPulls.Count > 0)
-                return backlogPulls;
-
-            if (firstPull != null)
-                return new List<SourcePull> { firstPull };
 
             return null;
         }
