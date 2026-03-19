@@ -24,6 +24,8 @@
 13. **Auto Placer Support** - Auto Placers function as standard automation chests
 14. **Stackable Critters** - All underwater creatures become stackable (configurable, default on)
 15. **Quarry Auto-Harvest** - Vanilla quarry day-change nodes can be auto-harvested into Autom8er chest/conveyor networks
+16. **Green Crates = Vacuum Crates** - Green crates harvest and vacuum nearby drops, then pass them into the connected network
+17. **Black Crates = Filter Crates** - Black crates hold sample items and route matching network items into a touching storage chest
 
 ---
 
@@ -35,6 +37,9 @@
 | 302 | Silo | 2x2 multi-tile, holds 200 Animal Food |
 | 417 | White Wooden Crate | INPUT ONLY container |
 | 430 | White Wooden Chest | INPUT ONLY container |
+| 410 | Black Wooden Crate | Filter crate root for routed storage |
+| 421 | Black Wooden Chest | Legacy output-only chest |
+| 412 | Green Wooden Crate | Vacuum crate |
 | 985 | Egg Incubator | Growth stage object, accepts fertilized eggs |
 | 190 | Quarry | Vanilla quarry root tile used by quarry auto-harvest |
 
@@ -86,12 +91,14 @@ Autom8er namespace
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
 │   ├── ApplyStackableCritters() - One-time: sets isStackable=true on all underwaterCreature items
 │   └── ProcessAllChests() - Main loop (ORDER MATTERS):
-│       1. FishPondHelper.TryFeedPondsAndTerrariums ← MUST BE FIRST among chest-fed systems (see Rule 7)
-│       2. TryFeedAdjacentMachine (furnaces, etc)
-│       3. TryFeedMachineViaConveyorPath (furnaces via conveyor)
-│       4. CrabPotHelper.TryLoadBaitIntoCrabPots (2-tile radius)
-│       5. GrowthStageHelper.TryLoadItemsIntoGrowthStages (incubators, etc)
-│       6. SiloHelper.TryLoadFeedIntoSilos (staggered bag animations)
+│       1. FilterCrateHelper.TryPullFilteredItemsFromNetwork for black crates
+│       2. VacuumCrateHelper.TryVacuumNearbyDrops / TryFlushStoredItemsToNetwork for green crates
+│       3. FishPondHelper.TryFeedPondsAndTerrariums ← MUST BE FIRST among chest-fed systems (see Rule 7)
+│       4. TryFeedAdjacentMachine (furnaces, etc)
+│       5. TryFeedMachineViaConveyorPath (furnaces via conveyor)
+│       6. CrabPotHelper.TryLoadBaitIntoCrabPots (2-tile radius)
+│       7. GrowthStageHelper.TryLoadItemsIntoGrowthStages (incubators, etc)
+│       8. SiloHelper.TryLoadFeedIntoSilos (staggered bag animations)
 │
 ├── QuarryServerDropCapturePatch / QuarryDirectedServerDropCapturePatch [HarmonyPatch]
 │   └── Prefix on both NetworkMapSharer.spawnAServerDrop overloads
@@ -157,13 +164,17 @@ Autom8er namespace
 │   │   └── Checks ConveyorAnimator.IsTargetReserved() to avoid double-feeding
 │   ├── TryFeedMachineViaConveyorPath() - Chest → path → machine (animated)
 │   │   └── ReserveTarget, animate, deposit+UnreserveTarget on arrival
-│   ├── TryDepositToAdjacentChest() - Machine → direct chest (instant)
-│   ├── TryDepositViaConveyorPath() - Machine → path → chest (animated)
+│   ├── OutputDestination - Routed destination info: storage chest + conveyor arrival tile
+│   ├── TryDepositToAdjacentChest() - Machine → direct routed destination (instant)
+│   ├── TryDepositViaConveyorPath() - Machine → path → routed destination (animated)
 │   │   └── Arrival callback: deposit or FallbackDepositToAnyChest if full
 │   ├── FallbackDepositToAnyChest() - BFS fallback when intended dest unavailable
 │   ├── IsConveyorTile() - Check if tile is conveyor path
 │   ├── IsInputOnlyContainer() - Check for white crate/chest
+│   ├── IsFilterCrate() - Check for black crates
 │   ├── IsSpecialContainer() - Exclude fish ponds, terrariums, auto placers, etc.
+│   ├── TryFindBestOutputDestinationFromNetworkAnchor() - Matching filter route, then matching stack, then empty chest
+│   ├── TryFindFilterDestinationFromCrate() - Resolve a black crate's touching storage chest
 │   ├── FindChestAt() - Get Chest object at position
 │   │   └── Filters out tileObjectItemChanger (gacha machines, etc.)
 │   ├── IsAutoSorter() - Check if chest is Auto Sorter
@@ -232,6 +243,20 @@ Autom8er namespace
 │       - Each bag deposits 2 items on arrival
 │       - Stagger interval = 0.5 tiles / AnimationSpeed
 │       - Only last bag calls UnreserveTarget
+│
+├── VacuumCrateHelper (static class)
+│   ├── Green crates only
+│   ├── ProcessDayChangeVacuumHarvests() - Day-change crop/tree harvest wave runner
+│   ├── TryVacuumNearbyDrops() - Suck nearby drops into the crate, then route them onward
+│   ├── TryFlushStoredItemsToNetwork() - Push items back out of the green crate into the network
+│   └── Uses routed output destinations, so filtered black-crate routes outrank generic storage
+│
+├── FilterCrateHelper (static class)
+│   ├── Black crates only
+│   ├── TryPullFilteredItemsFromNetwork() - Keeps one sample item, pulls matching items from connected source chests
+│   ├── FindSourcePull() - BFS the connected conveyor network for a valid source chest
+│   ├── Uses the black crate tile as the conveyor arrival point
+│   └── Deposits into the regular chest touching the black crate
 │
 └── FishPondHelper (static class)
     ├── TryFeedPondsAndTerrariums() - Entry point (outdoor only, 3-tile radius)
@@ -447,6 +472,21 @@ Same architecture as fish ponds but:
 - `IsInputOnlyContainer()` checks TileObject ID against WHITE_CRATE_TILE_ID (417) and WHITE_CHEST_TILE_ID (430)
 - Called in output functions to skip white containers
 - White containers CAN still feed machines (not blocked in input functions)
+
+### Filter Crates
+- `Black Wooden Crate` is no longer treated as a normal storage chest or legacy output-only crate
+- A black crate holds one or more sample items that define filter keys
+- Matching items first route to a black crate filter destination before ordinary matching-stack chests
+- The real storage is the regular chest touching that black crate
+- Conveyor visuals end on the black crate tile, then the item is deposited into the touching storage chest
+- The black crate never pulls back out of its own touching destination chest
+- Durability items in a black crate are filter keys only. Their durability value is preserved and not normalized
+
+### Vacuum Crates
+- `Green Wooden Crate` keeps a `21 x 21` harvest area and a `25 x 25` pickup area
+- Day-change harvests break in waves of 5 tiles with a 0.2s delay between waves
+- Multi-yield crop/tree drops are grouped so only one conveyor visual is shown per harvested tile/item group
+- Vacuumed items route through the connected network using the same destination priority as other outputs, so filter crates can sort vacuum harvests too
 
 ### Stackable Critters (v1.5.0)
 On first `Update()` tick, `ApplyStackableCritters()` iterates all `Inventory.Instance.allItems` and sets `isStackable = true` on any item with `underwaterCreature` set. This directly modifies the item data — no Harmony patch needed. Works everywhere including the 2 places in `Inventory.cs` that check the `isStackable` field directly (UI stacking logic). Config `StackableCritters = false` skips the modification entirely (vanilla behavior). Fish pond feeding is unaffected — our code already takes exactly 1 critter per feeding cycle regardless of stack size.

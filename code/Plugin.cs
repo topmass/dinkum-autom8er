@@ -1008,16 +1008,8 @@ namespace Autom8er
         public static ConveyorHelper.OutputDestination FindBestDestinationForHarvestOutput(int machineX, int machineY, HouseDetails inside, int itemId, int searchRadius = 1)
         {
             ConveyorHelper.OutputDestination destination;
-            if (ConveyorHelper.TryFindBestHarvestOutputDestination(machineX, machineY, inside, itemId, searchRadius, out destination))
-                return destination;
-
-            return null;
-        }
-
-        public static Chest FindBestChestForHarvestOutput(int machineX, int machineY, HouseDetails inside, int itemId, int searchRadius = 1)
-        {
-            ConveyorHelper.OutputDestination destination = FindBestDestinationForHarvestOutput(machineX, machineY, inside, itemId, searchRadius);
-            return destination != null ? destination.chest : null;
+            ConveyorHelper.TryFindBestHarvestOutputDestination(machineX, machineY, inside, itemId, searchRadius, out destination);
+            return destination;
         }
 
         public static Chest FindChestViaConveyorPath(int startX, int startY, HouseDetails inside)
@@ -2366,42 +2358,6 @@ namespace Autom8er
             return true;
         }
 
-        public static bool TryFindBestChestViaConveyorPathForOutput(int originX, int originY, HouseDetails inside, int itemId, out Chest bestChest, out int bestSlotIndex)
-        {
-            OutputDestination destination;
-            bool found = TryFindBestConveyorOutputDestination(originX, originY, inside, itemId, out destination);
-            bestChest = found ? destination.chest : null;
-            bestSlotIndex = found ? destination.slotIndex : -1;
-            return found;
-        }
-
-        public static bool TryFindBestChestFromNetworkAnchor(Chest anchorChest, HouseDetails inside, int itemId, out Chest bestChest, out int bestSlotIndex)
-        {
-            OutputDestination destination;
-            bool found = TryFindBestOutputDestinationFromNetworkAnchor(anchorChest, inside, itemId, includeAnchorChest: true, excludeVacuumCrates: false, out destination);
-            bestChest = found ? destination.chest : null;
-            bestSlotIndex = found ? destination.slotIndex : -1;
-            return found;
-        }
-
-        public static bool TryFindBestExternalChestFromNetworkAnchor(Chest anchorChest, HouseDetails inside, int itemId, out Chest bestChest, out int bestSlotIndex)
-        {
-            OutputDestination destination;
-            bool found = TryFindBestOutputDestinationFromNetworkAnchor(anchorChest, inside, itemId, includeAnchorChest: false, excludeVacuumCrates: false, out destination);
-            bestChest = found ? destination.chest : null;
-            bestSlotIndex = found ? destination.slotIndex : -1;
-            return found;
-        }
-
-        public static bool TryFindBestNonVacuumExternalChestFromNetworkAnchor(Chest anchorChest, HouseDetails inside, int itemId, out Chest bestChest, out int bestSlotIndex)
-        {
-            OutputDestination destination;
-            bool found = TryFindBestOutputDestinationFromNetworkAnchor(anchorChest, inside, itemId, includeAnchorChest: false, excludeVacuumCrates: true, out destination);
-            bestChest = found ? destination.chest : null;
-            bestSlotIndex = found ? destination.slotIndex : -1;
-            return found;
-        }
-
         public static bool TryFindFilterDestinationFromCrate(Chest filterChest, HouseDetails inside, int itemId, out OutputDestination destination)
         {
             destination = null;
@@ -2454,7 +2410,7 @@ namespace Autom8er
                 return true;
             }
 
-            return TryFindBestConveyorOutputDestinationFromRadius(originX, originY, inside, itemId, Mathf.Max(1, searchRadius), out bestDestination);
+            return TryFindBestConveyorOutputDestinationFromRadius(originX, originY, inside, itemId, searchRadius, out bestDestination);
         }
 
         public static bool TryFindBestOutputDestinationFromNetworkAnchor(Chest anchorChest, HouseDetails inside, int itemId, bool includeAnchorChest, bool excludeVacuumCrates, out OutputDestination bestDestination)
@@ -3502,7 +3458,8 @@ namespace Autom8er
         private const float VACUUM_VISUAL_HEIGHT = 1.6f;
         private const int VACUUM_HARVEST_BATCH_SIZE = 5;
         private const float VACUUM_HARVEST_BATCH_DELAY = 0.2f;
-        private const float VACUUM_NETWORK_FLUSH_DELAY = 0.03f;
+        private const float VACUUM_STACK_BUFFER_SECONDS = 0.3f;
+        private const int TRANSFER_STACK_CHUNK_SIZE = 10;
 
         private class VacuumVisualState
         {
@@ -3533,6 +3490,7 @@ namespace Autom8er
 
         private static readonly Dictionary<long, VacuumVisualState> activeVisuals = new Dictionary<long, VacuumVisualState>();
         private static readonly HashSet<uint> pendingDrops = new HashSet<uint>();
+        private static readonly Dictionary<long, float> pendingFlushStartedAt = new Dictionary<long, float>();
 
         private static long PosKey(int x, int y)
         {
@@ -3747,9 +3705,6 @@ namespace Autom8er
 
             ConveyorHelper.EnsureAutomationChestsActive(chest);
 
-            float delay = 0f;
-            bool movedAny = false;
-
             for (int slot = 0; slot < chest.itemIds.Length; slot++)
             {
                 int itemId = chest.itemIds[slot];
@@ -3758,24 +3713,37 @@ namespace Autom8er
                 if (itemId < 0 || stackAmount <= 0)
                     continue;
 
+                if (!ShouldFlushStackNow(chest, itemId, stackAmount))
+                    continue;
+
                 ConveyorHelper.OutputDestination networkDestination;
                 if (!ConveyorHelper.TryFindBestOutputDestinationFromNetworkAnchor(chest, inside, itemId, includeAnchorChest: false, excludeVacuumCrates: true, out networkDestination))
                     continue;
 
+                int moveAmount = Mathf.Min(GetTransferChunkSize(itemId), stackAmount);
                 int sourceSlot = slot;
                 int capturedItemId = itemId;
-                int capturedStackAmount = stackAmount;
+                int capturedMoveAmount = moveAmount;
                 Chest capturedSourceChest = chest;
                 Chest capturedNetworkChest = networkDestination.chest;
                 int capturedRouteX = networkDestination.routeX;
                 int capturedRouteY = networkDestination.routeY;
 
-                ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, sourceSlot, -1, 0, inside);
-                movedAny = true;
+                int remaining = stackAmount - moveAmount;
+                if (remaining > 0)
+                {
+                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, sourceSlot, itemId, remaining, inside);
+                }
+                else
+                {
+                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, sourceSlot, -1, 0, inside);
+                }
+
+                ClearPendingFlush(chest, capturedItemId);
 
                 System.Action depositToNetwork = () =>
                 {
-                    if (HarvestHelper.TryDepositHarvestToChest(capturedNetworkChest, inside, capturedItemId, capturedStackAmount))
+                    if (HarvestHelper.TryDepositHarvestToChest(capturedNetworkChest, inside, capturedItemId, capturedMoveAmount))
                         return;
 
                     ConveyorHelper.OutputDestination fallbackDestination;
@@ -3783,23 +3751,21 @@ namespace Autom8er
                         fallbackDestination != null &&
                         !(fallbackDestination.chest.xPos == capturedNetworkChest.xPos && fallbackDestination.chest.yPos == capturedNetworkChest.yPos))
                     {
-                        if (HarvestHelper.TryDepositHarvestToChest(fallbackDestination.chest, inside, capturedItemId, capturedStackAmount))
+                        if (HarvestHelper.TryDepositHarvestToChest(fallbackDestination.chest, inside, capturedItemId, capturedMoveAmount))
                             return;
                     }
 
-                    HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedStackAmount);
+                    HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedMoveAmount);
                 };
 
-                ConveyorAnimator.AnimateTransfer(capturedItemId, capturedStackAmount,
+                ConveyorAnimator.AnimateTransfer(capturedItemId, capturedMoveAmount,
                     new Vector2Int(chest.xPos, chest.yPos),
                     new Vector2Int(capturedRouteX, capturedRouteY),
-                    inside, depositToNetwork, delay);
+                    inside, depositToNetwork);
 
-                delay += VACUUM_NETWORK_FLUSH_DELAY;
+                TriggerVacuumVisual(chest.xPos, chest.yPos, GetVacuumFlushDelay() + 0.2f);
+                return;
             }
-
-            if (movedAny)
-                TriggerVacuumVisual(chest.xPos, chest.yPos, delay + 0.2f);
         }
 
         private static List<HarvestTarget> CollectNearbyHarvestTargets(Chest chest, HouseDetails inside)
@@ -3912,6 +3878,7 @@ namespace Autom8er
 
             activeVisuals.Clear();
             pendingDrops.Clear();
+            pendingFlushStartedAt.Clear();
         }
 
         private static bool IsDropInSameSpace(DroppedItem drop, HouseDetails inside)
@@ -3951,6 +3918,60 @@ namespace Autom8er
                 return true;
 
             return ConveyorHelper.CanDepositFromPosition(chest.xPos, chest.yPos, inside, itemId);
+        }
+
+        private static bool ShouldFlushStackNow(Chest chest, int itemId, int stackAmount)
+        {
+            if (!Inventory.Instance.allItems[itemId].checkIfStackable())
+            {
+                ClearPendingFlush(chest, itemId);
+                return true;
+            }
+
+            if (stackAmount >= TRANSFER_STACK_CHUNK_SIZE)
+            {
+                ClearPendingFlush(chest, itemId);
+                return true;
+            }
+
+            long key = GetFlushKey(chest, itemId);
+            float startedAt;
+            if (!pendingFlushStartedAt.TryGetValue(key, out startedAt))
+            {
+                pendingFlushStartedAt[key] = Time.time;
+                return false;
+            }
+
+            if (Time.time - startedAt < VACUUM_STACK_BUFFER_SECONDS)
+                return false;
+
+            pendingFlushStartedAt.Remove(key);
+            return true;
+        }
+
+        private static void ClearPendingFlush(Chest chest, int itemId)
+        {
+            pendingFlushStartedAt.Remove(GetFlushKey(chest, itemId));
+        }
+
+        private static long GetFlushKey(Chest chest, int itemId)
+        {
+            long chestKey = (((long)chest.xPos & 0xFFFFFL) << 44)
+                | (((long)chest.yPos & 0xFFFFFL) << 24)
+                | (((long)(chest.insideX + 1) & 0xFFFL) << 12)
+                | ((long)(chest.insideY + 1) & 0xFFFL);
+
+            return (chestKey << 20) ^ (uint)itemId;
+        }
+
+        private static int GetTransferChunkSize(int itemId)
+        {
+            return Inventory.Instance.allItems[itemId].checkIfStackable() ? TRANSFER_STACK_CHUNK_SIZE : 1;
+        }
+
+        private static float GetVacuumFlushDelay()
+        {
+            return Plugin.ScanInterval;
         }
 
         private static List<VacuumDropGroup> BuildDropGroups(List<DroppedItem> candidates)
@@ -4216,12 +4237,15 @@ namespace Autom8er
     {
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
+        private const int TRANSFER_STACK_CHUNK_SIZE = 10;
+        private const float TRANSFER_CHUNK_DELAY = 0.03f;
+        private const int LARGE_BACKLOG_THRESHOLD = 1000;
+        private const int LARGE_BACKLOG_TRANSFER_PER_PASS = 100;
 
         private class SourcePull
         {
             public Chest sourceChest;
             public int sourceSlot;
-            public int itemId;
             public int moveAmount;
         }
 
@@ -4242,8 +4266,7 @@ namespace Autom8er
                 if (itemId < 0 || stackAmount <= 0 || !processedItemIds.Add(itemId))
                     continue;
 
-                InventoryItem filterItem = Inventory.Instance.allItems[itemId];
-                bool isFuelItem = filterItem != null && filterItem.hasFuel;
+                bool isFuelItem = Inventory.Instance.allItems[itemId].hasFuel;
 
                 ConveyorHelper.OutputDestination destination;
                 if (!ConveyorHelper.TryFindFilterDestinationFromCrate(filterChest, inside, itemId, out destination))
@@ -4258,40 +4281,58 @@ namespace Autom8er
                     }
                 }
 
-                SourcePull pull = FindSourcePull(filterChest, inside, itemId, destination.chest);
-                if (pull == null)
+                List<SourcePull> pulls = FindSourcePulls(filterChest, inside, itemId, destination.chest);
+                if (pulls == null || pulls.Count == 0)
                     continue;
 
-                RemoveFromSourceChest(pull.sourceChest, pull.sourceSlot, pull.itemId, pull.moveAmount, inside);
+                float delay = 0f;
 
-                Chest capturedSourceChest = pull.sourceChest;
-                int capturedItemId = pull.itemId;
-                int capturedAmount = pull.moveAmount;
-                Chest capturedDestinationChest = destination.chest;
-                int capturedRouteX = destination.routeX;
-                int capturedRouteY = destination.routeY;
-
-                System.Action depositFiltered = () =>
+                for (int pullIndex = 0; pullIndex < pulls.Count; pullIndex++)
                 {
-                    if (HarvestHelper.TryDepositHarvestToChest(capturedDestinationChest, inside, capturedItemId, capturedAmount))
-                        return;
+                    SourcePull pull = pulls[pullIndex];
+                    RemoveFromSourceChest(pull.sourceChest, pull.sourceSlot, itemId, pull.moveAmount, inside);
 
-                    if (ConveyorHelper.FallbackDepositToAnyChest(capturedDestinationChest.xPos, capturedDestinationChest.yPos, inside, capturedItemId, capturedAmount))
-                        return;
+                    Chest capturedSourceChest = pull.sourceChest;
+                    int capturedItemId = itemId;
+                    int capturedAmount = pull.moveAmount;
+                    Chest capturedDestinationChest = destination.chest;
+                    int capturedRouteX = destination.routeX;
+                    int capturedRouteY = destination.routeY;
 
-                    HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedAmount);
-                };
+                    int remainingToSend = capturedAmount;
+                    int chunkSize = GetTransferChunkSize(capturedItemId);
 
-                ConveyorAnimator.AnimateTransfer(capturedItemId, capturedAmount,
-                    new Vector2Int(capturedSourceChest.xPos, capturedSourceChest.yPos),
-                    new Vector2Int(capturedRouteX, capturedRouteY),
-                    inside, depositFiltered);
+                    while (remainingToSend > 0)
+                    {
+                        int chunkAmount = Mathf.Min(chunkSize, remainingToSend);
+                        int capturedChunkAmount = chunkAmount;
+
+                        System.Action depositFiltered = () =>
+                        {
+                            if (HarvestHelper.TryDepositHarvestToChest(capturedDestinationChest, inside, capturedItemId, capturedChunkAmount))
+                                return;
+
+                            if (ConveyorHelper.FallbackDepositToAnyChest(capturedDestinationChest.xPos, capturedDestinationChest.yPos, inside, capturedItemId, capturedChunkAmount))
+                                return;
+
+                            HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedChunkAmount);
+                        };
+
+                        ConveyorAnimator.AnimateTransfer(capturedItemId, capturedChunkAmount,
+                            new Vector2Int(capturedSourceChest.xPos, capturedSourceChest.yPos),
+                            new Vector2Int(capturedRouteX, capturedRouteY),
+                            inside, depositFiltered, delay);
+
+                        delay += TRANSFER_CHUNK_DELAY;
+                        remainingToSend -= chunkAmount;
+                    }
+                }
 
                 return;
             }
         }
 
-        private static SourcePull FindSourcePull(Chest filterChest, HouseDetails inside, int itemId, Chest destinationChest)
+        private static List<SourcePull> FindSourcePulls(Chest filterChest, HouseDetails inside, int itemId, Chest destinationChest)
         {
             if (Plugin.ConveyorTileType == -1)
                 return null;
@@ -4299,6 +4340,10 @@ namespace Autom8er
             HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
             Queue<Vector2Int> toExplore = new Queue<Vector2Int>();
             HashSet<long> seenChests = new HashSet<long>();
+            SourcePull firstPull = null;
+            List<SourcePull> backlogPulls = null;
+            int totalAvailable = 0;
+            int plannedBacklogAmount = 0;
 
             for (int i = 0; i < 4; i++)
             {
@@ -4367,13 +4412,58 @@ namespace Autom8er
                         if (moveAmount <= 0)
                             continue;
 
-                        return new SourcePull
+                        totalAvailable += moveAmount;
+
+                        SourcePull pull = new SourcePull
                         {
                             sourceChest = chest,
                             sourceSlot = slot,
-                            itemId = itemId,
                             moveAmount = moveAmount
                         };
+
+                        if (firstPull == null)
+                            firstPull = pull;
+
+                        if (totalAvailable > LARGE_BACKLOG_THRESHOLD)
+                        {
+                            if (backlogPulls == null)
+                            {
+                                backlogPulls = new List<SourcePull>();
+
+                                if (firstPull != null)
+                                {
+                                    int firstPullAmount = Mathf.Min(firstPull.moveAmount, LARGE_BACKLOG_TRANSFER_PER_PASS);
+                                    backlogPulls.Add(new SourcePull
+                                    {
+                                        sourceChest = firstPull.sourceChest,
+                                        sourceSlot = firstPull.sourceSlot,
+                                        moveAmount = firstPullAmount
+                                    });
+                                    plannedBacklogAmount += firstPullAmount;
+                                }
+                            }
+
+                            if (!(firstPull != null &&
+                                  firstPull.sourceChest == pull.sourceChest &&
+                                  firstPull.sourceSlot == pull.sourceSlot))
+                            {
+                                int remainingBudget = LARGE_BACKLOG_TRANSFER_PER_PASS - plannedBacklogAmount;
+                                if (remainingBudget > 0)
+                                {
+                                    int backlogAmount = Mathf.Min(moveAmount, remainingBudget);
+                                    backlogPulls.Add(new SourcePull
+                                    {
+                                        sourceChest = pull.sourceChest,
+                                        sourceSlot = pull.sourceSlot,
+                                        moveAmount = backlogAmount
+                                    });
+                                    plannedBacklogAmount += backlogAmount;
+                                }
+                            }
+
+                            if (plannedBacklogAmount >= LARGE_BACKLOG_TRANSFER_PER_PASS)
+                                return backlogPulls;
+                        }
                     }
                 }
 
@@ -4397,6 +4487,12 @@ namespace Autom8er
                 }
             }
 
+            if (backlogPulls != null && backlogPulls.Count > 0)
+                return backlogPulls;
+
+            if (firstPull != null)
+                return new List<SourcePull> { firstPull };
+
             return null;
         }
 
@@ -4406,12 +4502,13 @@ namespace Autom8er
             if (stack <= 0)
                 return 0;
 
-            InventoryItem item = Inventory.Instance.allItems[itemId];
-            if (item == null)
-                return 0;
-
-            bool keepOne = Plugin.KeepOneItem && !ConveyorHelper.IsAutoSorter(sourceChest) && item.checkIfStackable();
+            bool keepOne = Plugin.KeepOneItem && !ConveyorHelper.IsAutoSorter(sourceChest) && Inventory.Instance.allItems[itemId].checkIfStackable();
             return keepOne ? stack - 1 : stack;
+        }
+
+        private static int GetTransferChunkSize(int itemId)
+        {
+            return Inventory.Instance.allItems[itemId].checkIfStackable() ? TRANSFER_STACK_CHUNK_SIZE : 1;
         }
 
         private static void RemoveFromSourceChest(Chest sourceChest, int slot, int itemId, int moveAmount, HouseDetails inside)
