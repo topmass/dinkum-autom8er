@@ -350,8 +350,13 @@ namespace Autom8er
                 if (ConveyorHelper.IsOutputOnlyContainer(chest.xPos, chest.yPos, inside))
                     continue;
 
-                VacuumCrateHelper.TryVacuumNearbyDrops(chest, inside);
-                VacuumCrateHelper.TryFlushStoredItemsToNetwork(chest, inside);
+                if (ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, inside))
+                {
+                    VacuumCrateHelper.TryVacuumNearbyDrops(chest, inside);
+                    VacuumCrateHelper.TryProcessFarmTile(chest, inside);
+                    VacuumCrateHelper.TryFlushStoredItemsToNetwork(chest, inside);
+                    continue;
+                }
 
                 if (!ConveyorHelper.ChestHasItems(chest))
                     continue;
@@ -2947,7 +2952,7 @@ namespace Autom8er
 
         private static bool IsValidFilterStorageChest(int x, int y, HouseDetails inside)
         {
-            if (IsInputOnlyContainer(x, y, inside) || IsOutputOnlyContainer(x, y, inside) || IsFilterCrate(x, y, inside) || IsVacuumCrate(x, y, inside))
+            if (IsInputOnlyContainer(x, y, inside) || IsOutputOnlyContainer(x, y, inside) || IsFilterCrate(x, y, inside))
                 return false;
 
             if (IsSpecialContainer(x, y, inside))
@@ -3603,8 +3608,13 @@ namespace Autom8er
 
     public static class VacuumCrateHelper
     {
+        private const int FERTILIZER_ITEM_ID = 275;
         private const int VACUUM_HARVEST_RADIUS_TILES = 10;
         private const int VACUUM_PICKUP_RADIUS_TILES = 12;
+        private const int FARM_ACTIONS_PER_SCAN = 2;
+        private const float FARM_FOLLOW_UP_DELAY_SECONDS = 0.1f;
+        private const float FARM_TILE_RESERVATION_SECONDS = 0.35f;
+        private const float POST_DAY_CHANGE_HARVEST_FARM_DELAY_SECONDS = 0.3f;
         private const float VACUUM_ITEM_DELAY = 0.03f;
         private const float VACUUM_VISUAL_HEIGHT = 1.6f;
         private const int VACUUM_HARVEST_BATCH_SIZE = 5;
@@ -3628,6 +3638,13 @@ namespace Autom8er
             public TileObjectGrowthStages growth;
         }
 
+        private class FarmTileTarget
+        {
+            public int xPos;
+            public int yPos;
+            public int distance;
+        }
+
         private class VacuumDropGroup
         {
             public int itemId;
@@ -3639,9 +3656,30 @@ namespace Autom8er
             public List<uint> dropIds = new List<uint>();
         }
 
+        private enum PendingFarmActionType
+        {
+            Fertilize,
+            PlantSeed
+        }
+
+        private class PendingFarmAction
+        {
+            public int chestX;
+            public int chestY;
+            public int tileX;
+            public int tileY;
+            public PendingFarmActionType actionType;
+            public int itemId;
+            public float executeAt;
+        }
+
         private static readonly Dictionary<long, VacuumVisualState> activeVisuals = new Dictionary<long, VacuumVisualState>();
         private static readonly HashSet<uint> pendingDrops = new HashSet<uint>();
         private static readonly Dictionary<long, float> pendingFlushStartedAt = new Dictionary<long, float>();
+        private static readonly Dictionary<long, float> reservedFarmTiles = new Dictionary<long, float>();
+        private static readonly List<PendingFarmAction> pendingFarmActions = new List<PendingFarmAction>();
+        private static bool dayChangeVacuumHarvestRunning = false;
+        private static float farmerActionsBlockedUntil = 0f;
 
         private static long PosKey(int x, int y)
         {
@@ -3653,13 +3691,31 @@ namespace Autom8er
             if (WorldManager.Instance == null || ContainerManager.manage == null || !NetworkMapSharer.Instance.isServer)
                 yield break;
 
+            BeginDayChangeHarvestPhase();
             ActivateAllVacuumCrates();
 
             List<Chest> chestsCopy = new List<Chest>(ContainerManager.manage.activeChests);
             if (chestsCopy.Count == 0)
+            {
+                EndDayChangeHarvestPhase();
                 yield break;
+            }
+
+            chestsCopy.Sort((a, b) =>
+            {
+                if (a == null && b == null)
+                    return 0;
+                if (a == null)
+                    return 1;
+                if (b == null)
+                    return -1;
+                if (a.yPos != b.yPos)
+                    return a.yPos.CompareTo(b.yPos);
+                return a.xPos.CompareTo(b.xPos);
+            });
 
             int harvested = 0;
+            HashSet<long> claimedHarvestTiles = new HashSet<long>();
 
             for (int i = 0; i < chestsCopy.Count; i++)
             {
@@ -3670,7 +3726,7 @@ namespace Autom8er
                 if (!ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, null))
                     continue;
 
-                List<HarvestTarget> harvestTargets = CollectNearbyHarvestTargets(chest, null);
+                List<HarvestTarget> harvestTargets = CollectNearbyHarvestTargets(chest, null, claimedHarvestTiles);
                 for (int harvestIndex = 0; harvestIndex < harvestTargets.Count; harvestIndex++)
                 {
                     HarvestTarget target = harvestTargets[harvestIndex];
@@ -3695,6 +3751,8 @@ namespace Autom8er
             {
                 Plugin.Log.LogInfo("Autom8er: Vacuum crate day-change harvest collected " + harvested + " crop/tree tile(s).");
             }
+
+            EndDayChangeHarvestPhase();
         }
 
         public static void TryVacuumNearbyDrops(Chest chest, HouseDetails inside)
@@ -3864,6 +3922,9 @@ namespace Autom8er
                 if (itemId < 0 || stackAmount <= 0)
                     continue;
 
+                if (IsFarmerManagedItem(itemId))
+                    continue;
+
                 if (!ShouldFlushStackNow(chest, itemId, stackAmount))
                     continue;
 
@@ -3919,7 +3980,70 @@ namespace Autom8er
             }
         }
 
-        private static List<HarvestTarget> CollectNearbyHarvestTargets(Chest chest, HouseDetails inside)
+        public static void TryProcessFarmTile(Chest chest, HouseDetails inside)
+        {
+            if (chest == null || inside != null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, inside))
+                return;
+
+            if (WorldManager.Instance == null || NetworkMapSharer.Instance == null)
+                return;
+
+            if (AreFarmerActionsSuspended())
+                return;
+
+            for (int action = 0; action < FARM_ACTIONS_PER_SCAN; action++)
+            {
+                if (!TryProcessOneFarmAction(chest))
+                    return;
+            }
+        }
+
+        private static bool TryProcessOneFarmAction(Chest chest)
+        {
+            int fertilizerSlot = FindItemSlot(chest, IsFertilizerItem);
+            bool hasFertilizer = fertilizerSlot != -1;
+
+            if (hasFertilizer && TryFindBestFarmTile(chest, CanFertilizeTile, out FarmTileTarget fertilizeTarget))
+            {
+                ApplyFertilizerAt(chest, fertilizerSlot, fertilizeTarget.xPos, fertilizeTarget.yPos);
+                int seedItemId = GetFirstCropSeedItemId(chest);
+                if (seedItemId >= 0)
+                    QueueFollowUpFarmActions(chest, fertilizeTarget.xPos, fertilizeTarget.yPos, queueFertilizer: false, seedItemId);
+                return true;
+            }
+
+            for (int slot = 0; slot < chest.itemIds.Length; slot++)
+            {
+                int itemId = chest.itemIds[slot];
+                if (!IsCropSeedItem(itemId))
+                    continue;
+
+                if (!TryFindBestFarmTile(chest, (xPos, yPos) => CanPlantSeedAt(itemId, xPos, yPos), out FarmTileTarget plantTarget))
+                    continue;
+
+                PlantSeedAt(chest, slot, itemId, plantTarget.xPos, plantTarget.yPos);
+                return true;
+            }
+
+            if (!HasHoeTool(chest))
+                return false;
+
+            bool shouldTill = hasFertilizer || HasAnyCropSeed(chest);
+            if (!shouldTill)
+                return false;
+
+            if (TryFindBestFarmTile(chest, CanHoeTile, out FarmTileTarget hoeTarget))
+            {
+                HoeTileAt(hoeTarget.xPos, hoeTarget.yPos);
+                int seedItemId = GetFirstCropSeedItemId(chest);
+                QueueFollowUpFarmActions(chest, hoeTarget.xPos, hoeTarget.yPos, hasFertilizer, seedItemId);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static List<HarvestTarget> CollectNearbyHarvestTargets(Chest chest, HouseDetails inside, HashSet<long> claimedHarvestTiles)
         {
             if (chest == null || inside != null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, inside))
                 return new List<HarvestTarget>();
@@ -3955,6 +4079,10 @@ namespace Autom8er
                     if (!IsVacuumHarvestCandidate(tileObj, growth, statusMap[x, y]))
                         continue;
 
+                    long tileKey = PosKey(x, y);
+                    if (claimedHarvestTiles != null && !claimedHarvestTiles.Add(tileKey))
+                        continue;
+
                     targets.Add(new HarvestTarget
                     {
                         xPos = x,
@@ -3983,6 +4111,9 @@ namespace Autom8er
 
         public static void UpdateVisuals()
         {
+            ProcessPendingFarmActions();
+            ClearExpiredFarmReservations();
+
             if (activeVisuals.Count == 0)
                 return;
 
@@ -4030,6 +4161,8 @@ namespace Autom8er
             activeVisuals.Clear();
             pendingDrops.Clear();
             pendingFlushStartedAt.Clear();
+            reservedFarmTiles.Clear();
+            pendingFarmActions.Clear();
         }
 
         private static bool IsDropInSameSpace(DroppedItem drop, HouseDetails inside)
@@ -4069,6 +4202,409 @@ namespace Autom8er
                 return true;
 
             return ConveyorHelper.CanDepositFromPosition(chest.xPos, chest.yPos, inside, itemId);
+        }
+
+        private static bool HasAnyCropSeed(Chest chest)
+        {
+            return FindItemSlot(chest, IsCropSeedItem) != -1;
+        }
+
+        private static int GetFirstCropSeedItemId(Chest chest)
+        {
+            int slot = FindItemSlot(chest, IsCropSeedItem);
+            return slot == -1 ? -1 : chest.itemIds[slot];
+        }
+
+        private static bool HasHoeTool(Chest chest)
+        {
+            return FindItemSlot(chest, IsHoeToolItem) != -1;
+        }
+
+        private static int FindItemSlot(Chest chest, System.Func<int, bool> predicate)
+        {
+            if (chest == null || predicate == null)
+                return -1;
+
+            for (int slot = 0; slot < chest.itemIds.Length; slot++)
+            {
+                int itemId = chest.itemIds[slot];
+                if (itemId < 0 || chest.itemStacks[slot] <= 0)
+                    continue;
+
+                if (predicate(itemId))
+                    return slot;
+            }
+
+            return -1;
+        }
+
+        private static bool IsFarmerManagedItem(int itemId)
+        {
+            return IsHoeToolItem(itemId) || IsFertilizerItem(itemId) || IsCropSeedItem(itemId);
+        }
+
+        private static bool IsFertilizerItem(int itemId)
+        {
+            return itemId == FERTILIZER_ITEM_ID;
+        }
+
+        private static bool IsHoeToolItem(int itemId)
+        {
+            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            if (item == null || !item.isATool || !item.hasFuel || string.IsNullOrEmpty(item.itemName))
+                return false;
+
+            return item.itemName.IndexOf("Hoe", System.StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsCropSeedItem(int itemId)
+        {
+            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            if (item == null || item.placeable == null || item.placeable.tileObjectGrowthStages == null)
+                return false;
+
+            return item.placeable.tileObjectGrowthStages.needsTilledSoil;
+        }
+
+        private static bool TryFindBestFarmTile(Chest chest, System.Func<int, int, bool> validator, out FarmTileTarget bestTarget)
+        {
+            bestTarget = null;
+            if (chest == null || validator == null || WorldManager.Instance == null)
+                return false;
+
+            int[,] tileMap = WorldManager.Instance.onTileMap;
+            int mapW = tileMap.GetLength(0);
+            int mapH = tileMap.GetLength(1);
+
+            int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minY = Mathf.Max(0, chest.yPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxY = Mathf.Min(mapH - 1, chest.yPos + VACUUM_HARVEST_RADIUS_TILES);
+
+            for (int x = minX; x <= maxX; x++)
+            {
+                for (int y = minY; y <= maxY; y++)
+                {
+                    if (!validator(x, y))
+                        continue;
+
+                    int distance = Mathf.Abs(x - chest.xPos) + Mathf.Abs(y - chest.yPos);
+                    if (bestTarget == null ||
+                        distance < bestTarget.distance ||
+                        (distance == bestTarget.distance && (y < bestTarget.yPos || (y == bestTarget.yPos && x < bestTarget.xPos))))
+                    {
+                        bestTarget = new FarmTileTarget
+                        {
+                            xPos = x,
+                            yPos = y,
+                            distance = distance
+                        };
+                    }
+                }
+            }
+
+            return bestTarget != null;
+        }
+
+        private static bool CanHoeTile(int xPos, int yPos)
+        {
+            if (!IsOutdoorFarmTileInRange(xPos, yPos))
+                return false;
+
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            if (tileObjectId > -1)
+            {
+                if (tileObjectId >= WorldManager.Instance.allObjectSettings.Length)
+                    return false;
+
+                TileObjectSettings settings = WorldManager.Instance.allObjectSettings[tileObjectId];
+                if (settings == null || (!settings.isGrass && tileObjectId != 30))
+                    return false;
+            }
+
+            int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
+            if (tileType == 7 || tileType == 8 || tileType == 12 || tileType == 13)
+                return false;
+
+            var tileInfo = WorldManager.Instance.tileTypes[tileType];
+            if (tileInfo != null && tileInfo.dropOnChange != null)
+                return false;
+
+            return true;
+        }
+
+        private static bool CanFertilizeTile(int xPos, int yPos)
+        {
+            if (!IsOutdoorFarmTileInRange(xPos, yPos))
+                return false;
+
+            int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
+            return tileType == 7 || tileType == 8;
+        }
+
+        private static bool CanPlantSeedAt(int itemId, int xPos, int yPos)
+        {
+            if (!IsCropSeedItem(itemId) || !IsOutdoorFarmTileInRange(xPos, yPos))
+                return false;
+
+            int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
+            if (tileType != 7 && tileType != 8 && tileType != 12 && tileType != 13)
+                return false;
+
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            return tileObjectId == -1 || tileObjectId == 30;
+        }
+
+        private static bool IsOutdoorFarmTileInRange(int xPos, int yPos, bool ignoreReservation = false)
+        {
+            if (WorldManager.Instance == null || NetworkMapSharer.Instance == null)
+                return false;
+
+            if (xPos < 0 || yPos < 0 || xPos >= WorldManager.Instance.GetMapSize() || yPos >= WorldManager.Instance.GetMapSize())
+                return false;
+
+            if (WorldManager.Instance.CheckTileClientLock(xPos, yPos))
+                return false;
+
+            if (!ignoreReservation && IsFarmTileReserved(xPos, yPos))
+                return false;
+
+            return true;
+        }
+
+        private static void HoeTileAt(int xPos, int yPos)
+        {
+            ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
+            int tilledTileType = WeatherManager.Instance != null && WeatherManager.Instance.IsRaining ? 8 : 7;
+            NetworkMapSharer.Instance.RpcUpdateTileType(tilledTileType, xPos, yPos);
+
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            if (tileObjectId > -1 &&
+                tileObjectId < WorldManager.Instance.allObjectSettings.Length &&
+                WorldManager.Instance.allObjectSettings[tileObjectId] != null &&
+                WorldManager.Instance.allObjectSettings[tileObjectId].isGrass)
+            {
+                NetworkMapSharer.Instance.RpcUpdateOnTileObject(-1, xPos, yPos);
+            }
+        }
+
+        private static void ApplyFertilizerAt(Chest chest, int slot, int xPos, int yPos)
+        {
+            InventoryItem fertilizer = Inventory.Instance.allItems[FERTILIZER_ITEM_ID];
+            if (fertilizer == null)
+                return;
+
+            ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
+            int newTileType = fertilizer.getResultingPlaceableTileType(WorldManager.Instance.tileTypeMap[xPos, yPos]);
+            NetworkMapSharer.Instance.RpcUpdateTileType(newTileType, xPos, yPos);
+            ConsumeOneItem(chest, slot);
+        }
+
+        private static void PlantSeedAt(Chest chest, int slot, int itemId, int xPos, int yPos)
+        {
+            InventoryItem seed = Inventory.Instance.allItems[itemId];
+            if (seed == null || seed.placeable == null)
+                return;
+
+            ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
+            NetworkMapSharer.Instance.RpcUpdateOnTileObject(seed.placeable.tileObjectId, xPos, yPos);
+            ConsumeOneItem(chest, slot);
+        }
+
+        private static void QueueFollowUpFarmActions(Chest chest, int tileX, int tileY, bool queueFertilizer, int seedItemId)
+        {
+            if (chest == null)
+                return;
+
+            float nextAt = Time.time + FARM_FOLLOW_UP_DELAY_SECONDS;
+
+            if (queueFertilizer)
+            {
+                pendingFarmActions.Add(new PendingFarmAction
+                {
+                    chestX = chest.xPos,
+                    chestY = chest.yPos,
+                    tileX = tileX,
+                    tileY = tileY,
+                    actionType = PendingFarmActionType.Fertilize,
+                    itemId = FERTILIZER_ITEM_ID,
+                    executeAt = nextAt
+                });
+                nextAt += FARM_FOLLOW_UP_DELAY_SECONDS;
+            }
+
+            if (seedItemId >= 0)
+            {
+                pendingFarmActions.Add(new PendingFarmAction
+                {
+                    chestX = chest.xPos,
+                    chestY = chest.yPos,
+                    tileX = tileX,
+                    tileY = tileY,
+                    actionType = PendingFarmActionType.PlantSeed,
+                    itemId = seedItemId,
+                    executeAt = nextAt
+                });
+                nextAt += FARM_FOLLOW_UP_DELAY_SECONDS;
+            }
+
+            if (nextAt > Time.time)
+                ReserveFarmTile(tileX, tileY, nextAt + FARM_TILE_RESERVATION_SECONDS);
+        }
+
+        private static void ProcessPendingFarmActions()
+        {
+            if (AreFarmerActionsSuspended())
+                return;
+
+            if (pendingFarmActions.Count == 0)
+                return;
+
+            for (int i = pendingFarmActions.Count - 1; i >= 0; i--)
+            {
+                PendingFarmAction action = pendingFarmActions[i];
+                if (action == null)
+                {
+                    pendingFarmActions.RemoveAt(i);
+                    continue;
+                }
+
+                if (Time.time < action.executeAt)
+                    continue;
+
+                Chest chest = ConveyorHelper.FindChestAt(action.chestX, action.chestY, null);
+                if (chest == null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, null))
+                {
+                    pendingFarmActions.RemoveAt(i);
+                    continue;
+                }
+
+                switch (action.actionType)
+                {
+                    case PendingFarmActionType.Fertilize:
+                    {
+                        int slot = FindItemSlot(chest, IsFertilizerItem);
+                        if (slot != -1 && CanFertilizeTileNow(action.tileX, action.tileY))
+                            ApplyFertilizerAt(chest, slot, action.tileX, action.tileY);
+                        break;
+                    }
+                    case PendingFarmActionType.PlantSeed:
+                    {
+                        int slot = FindItemSlot(chest, itemId => itemId == action.itemId);
+                        if (slot != -1 && CanPlantSeedAtNow(action.itemId, action.tileX, action.tileY))
+                            PlantSeedAt(chest, slot, action.itemId, action.tileX, action.tileY);
+                        break;
+                    }
+                }
+
+                pendingFarmActions.RemoveAt(i);
+            }
+        }
+
+        private static void BeginDayChangeHarvestPhase()
+        {
+            dayChangeVacuumHarvestRunning = true;
+            pendingFarmActions.Clear();
+            farmerActionsBlockedUntil = Mathf.Max(farmerActionsBlockedUntil, Time.time + POST_DAY_CHANGE_HARVEST_FARM_DELAY_SECONDS);
+        }
+
+        private static void EndDayChangeHarvestPhase()
+        {
+            dayChangeVacuumHarvestRunning = false;
+            pendingFarmActions.Clear();
+            farmerActionsBlockedUntil = Mathf.Max(farmerActionsBlockedUntil, Time.time + POST_DAY_CHANGE_HARVEST_FARM_DELAY_SECONDS);
+        }
+
+        private static bool AreFarmerActionsSuspended()
+        {
+            return dayChangeVacuumHarvestRunning || Time.time < farmerActionsBlockedUntil;
+        }
+
+        private static bool CanFertilizeTileNow(int xPos, int yPos)
+        {
+            if (!IsOutdoorFarmTileInRange(xPos, yPos, ignoreReservation: true))
+                return false;
+
+            int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
+            return tileType == 7 || tileType == 8;
+        }
+
+        private static bool CanPlantSeedAtNow(int itemId, int xPos, int yPos)
+        {
+            if (!IsCropSeedItem(itemId) || !IsOutdoorFarmTileInRange(xPos, yPos, ignoreReservation: true))
+                return false;
+
+            int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
+            if (tileType != 7 && tileType != 8 && tileType != 12 && tileType != 13)
+                return false;
+
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            return tileObjectId == -1 || tileObjectId == 30;
+        }
+
+        private static bool IsFarmTileReserved(int xPos, int yPos)
+        {
+            long key = PosKey(xPos, yPos);
+            if (!reservedFarmTiles.TryGetValue(key, out float reservedUntil))
+                return false;
+
+            return reservedUntil > Time.time;
+        }
+
+        private static void ReserveFarmTile(int xPos, int yPos, float until)
+        {
+            long key = PosKey(xPos, yPos);
+            if (reservedFarmTiles.TryGetValue(key, out float existingUntil))
+            {
+                if (existingUntil >= until)
+                    return;
+            }
+
+            reservedFarmTiles[key] = until;
+        }
+
+        private static void ClearExpiredFarmReservations()
+        {
+            if (reservedFarmTiles.Count == 0)
+                return;
+
+            List<long> expired = null;
+            foreach (KeyValuePair<long, float> entry in reservedFarmTiles)
+            {
+                if (entry.Value > Time.time)
+                    continue;
+
+                if (expired == null)
+                    expired = new List<long>();
+                expired.Add(entry.Key);
+            }
+
+            if (expired == null)
+                return;
+
+            for (int i = 0; i < expired.Count; i++)
+                reservedFarmTiles.Remove(expired[i]);
+        }
+
+        private static void ConsumeOneItem(Chest chest, int slot)
+        {
+            int itemId = chest.itemIds[slot];
+            int remaining = chest.itemStacks[slot] - 1;
+
+            if (remaining > 0)
+            {
+                ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, itemId, remaining, null);
+            }
+            else
+            {
+                ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, -1, 0, null);
+            }
         }
 
         private static bool ShouldFlushStackNow(Chest chest, int itemId, int stackAmount)
@@ -4207,6 +4743,7 @@ namespace Autom8er
 
         private static void HarvestPlantAt(int xPos, int yPos, TileObject tileObj, TileObjectGrowthStages growth)
         {
+            WorldManager.Instance.lockTileClient(xPos, yPos);
             int newStatus = WorldManager.Instance.onTileStatusMap[xPos, yPos] + growth.takeOrAddFromStateOnHarvest;
             if (newStatus < 0)
                 newStatus = 0;
