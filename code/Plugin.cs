@@ -30,11 +30,11 @@ namespace Autom8er
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
 
-        // TileObject IDs for INPUT ONLY containers (won't receive machine outputs)
+        // TileObject IDs for INPUT ONLY containers (crate only)
         public const int WHITE_CRATE_TILE_ID = 417;
         public const int WHITE_CHEST_TILE_ID = 430;
 
-        // TileObject IDs for legacy output-only containers
+        // TileObject IDs for filter crate / standard chest color variants
         public const int BLACK_CRATE_TILE_ID = 410;
         public const int BLACK_CHEST_TILE_ID = 421;
 
@@ -250,6 +250,8 @@ namespace Autom8er
                 loadCatchUpNextAttemptAt = Time.realtimeSinceStartup + 2f;
                 return;
             }
+
+            ConveyorHelper.ActivateAllOutdoorAutomationChests();
 
             if (ContainerManager.manage.activeChests.Count == 0 && loadCatchUpAttempts < 5)
             {
@@ -529,6 +531,21 @@ namespace Autom8er
         public static void TryGrantHarvestOutputCredit(int tileObjectId, int itemId, int amount)
         {
             TryGrantOutputCredit(tileObjectId, itemId, amount);
+        }
+
+        public static void TryGrantPlantSeedCredit()
+        {
+            if (DailyTaskGenerator.generate == null)
+                return;
+
+            try
+            {
+                DailyTaskGenerator.generate.doATask(DailyTaskGenerator.genericTaskType.PlantSeeds);
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Autom8er: Failed to grant seed planting credit: " + e.Message);
+            }
         }
 
         public static void TryGrantTileObjectBreakCredit(int tileObjectId)
@@ -888,6 +905,7 @@ namespace Autom8er
             if (NetworkMapSharer.Instance == null || !NetworkMapSharer.Instance.isServer || WorldManager.Instance == null)
                 yield break;
 
+            ConveyorHelper.ActivateAllOutdoorAutomationChests();
             Plugin.Log.LogInfo(startLog);
             HarvestHelper.ProcessHarvestableMachines();
             yield return new WaitForSeconds(DAY_CHANGE_PHASE_DELAY_SECONDS);
@@ -1410,15 +1428,10 @@ namespace Autom8er
             if (growth.spawnsFarmAnimal)
                 return false;
 
-            // Farm crops and hand-harvest plant outputs are owned by the vacuum/farmer path.
-            // If the generic machine harvest pass touches them first, they disappear instantly
-            // instead of following the intended chest vacuum animation flow.
-            bool isFarmCrop = growth.needsTilledSoil || growth.isAPlantSproutFromAFarmPlant(tileObj.tileObjectId);
-            bool isHandHarvestPlant = growth.harvestableByHand &&
-                                      ((bool)growth.harvestDrop || (bool)growth.dropsFromLootTable) &&
-                                      tileObj.tileObjectChest == null &&
-                                      tileObj.tileObjectItemChanger == null;
-            if (isFarmCrop || isHandHarvestPlant)
+            // Only skip harvests that are explicitly owned by a nearby VacuFarm crate.
+            // A broader plant-style check accidentally swallowed normal harvest machines
+            // like hives and crab pots from the standard day-change machine path.
+            if (VacuumCrateHelper.IsOwnedByVacuumCrate(xPos, yPos, inside, tileObj, growth))
                 return false;
 
             // Check if harvestable (not manually harvestable check - we want auto-harvest)
@@ -3192,16 +3205,12 @@ namespace Autom8er
             if (tileObjectId < 0)
                 return false;
 
-            return tileObjectId == Plugin.WHITE_CRATE_TILE_ID || tileObjectId == Plugin.WHITE_CHEST_TILE_ID;
+            return tileObjectId == Plugin.WHITE_CRATE_TILE_ID;
         }
 
         public static bool IsOutputOnlyContainer(int x, int y, HouseDetails inside)
         {
-            int tileObjectId = GetTileObjectId(x, y, inside);
-            if (tileObjectId < 0)
-                return false;
-
-            return tileObjectId == Plugin.BLACK_CHEST_TILE_ID;
+            return false;
         }
 
         public static bool IsFilterCrate(int x, int y, HouseDetails inside)
@@ -3419,6 +3428,29 @@ namespace Autom8er
                 return;
 
             EnsureNearbyChestsActive(anchorChest);
+        }
+
+        public static void ActivateAllOutdoorAutomationChests()
+        {
+            if (WorldManager.Instance == null || ContainerManager.manage == null)
+                return;
+
+            int mapSize = WorldManager.Instance.GetMapSize();
+            for (int x = 0; x < mapSize; x++)
+            {
+                for (int y = 0; y < mapSize; y++)
+                {
+                    int tileId = WorldManager.Instance.onTileMap[x, y];
+                    if (tileId <= 0)
+                        continue;
+
+                    TileObject tileObj = WorldManager.Instance.allObjects[tileId];
+                    if (tileObj == null || !tileObj.tileObjectChest || tileObj.tileObjectItemChanger)
+                        continue;
+
+                    ContainerManager.manage.getChestForRecycling(x, y, null);
+                }
+            }
         }
 
         public static int FindSlotForItem(Chest chest, int itemId)
@@ -3764,6 +3796,34 @@ namespace Autom8er
             }
 
             EndDayChangeHarvestPhase();
+        }
+
+        public static bool IsOwnedByVacuumCrate(int xPos, int yPos, HouseDetails inside, TileObject tileObj, TileObjectGrowthStages growth)
+        {
+            if (inside != null || tileObj == null || growth == null || WorldManager.Instance == null)
+                return false;
+
+            if (!IsVacuumHarvestCandidate(tileObj, growth, WorldManager.Instance.onTileStatusMap[xPos, yPos]))
+                return false;
+
+            int mapW = WorldManager.Instance.onTileMap.GetLength(0);
+            int mapH = WorldManager.Instance.onTileMap.GetLength(1);
+            int minX = Mathf.Max(0, xPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxX = Mathf.Min(mapW - 1, xPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minY = Mathf.Max(0, yPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxY = Mathf.Min(mapH - 1, yPos + VACUUM_HARVEST_RADIUS_TILES);
+
+            for (int scanX = minX; scanX <= maxX; scanX++)
+            {
+                for (int scanY = minY; scanY <= maxY; scanY++)
+                {
+                    if (WorldManager.Instance.onTileMap[scanX, scanY] != Plugin.GREEN_CRATE_TILE_ID)
+                        continue;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         public static void TryVacuumNearbyDrops(Chest chest, HouseDetails inside)
@@ -4426,6 +4486,7 @@ namespace Autom8er
             ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
             NetworkMapSharer.Instance.RpcUpdateOnTileObject(seed.placeable.tileObjectId, xPos, yPos);
             ConsumeOneItem(chest, slot);
+            AutomationCreditHelper.TryGrantPlantSeedCredit();
         }
 
         private static void QueueFollowUpFarmActions(Chest chest, int tileX, int tileY, bool queueFertilizer, int seedItemId)

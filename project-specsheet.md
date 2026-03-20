@@ -801,6 +801,8 @@ Rules:
 2. Standard machine output automation must grant output credit on successful chest deposit, not only on the original machine trigger.
 3. Any fallback deposit path must trigger the same credit callback or large automation arrays can lose progression silently.
 4. Harvest-style automation must only grant output credit after the item is successfully stored.
+5. Any new automated Autom8er feature must preserve the same player credit vanilla would normally award for that action, if vanilla awards any.
+6. If vanilla does not award credit for an action, Autom8er should not invent new credit for it.
 
 ### Single-Chest Mega Arrays Need Two Separate Fixes
 Supporting a 1000+ contiguous day-change array from one chest required solving two different problems:
