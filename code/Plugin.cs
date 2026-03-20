@@ -1410,6 +1410,17 @@ namespace Autom8er
             if (growth.spawnsFarmAnimal)
                 return false;
 
+            // Farm crops and hand-harvest plant outputs are owned by the vacuum/farmer path.
+            // If the generic machine harvest pass touches them first, they disappear instantly
+            // instead of following the intended chest vacuum animation flow.
+            bool isFarmCrop = growth.needsTilledSoil || growth.isAPlantSproutFromAFarmPlant(tileObj.tileObjectId);
+            bool isHandHarvestPlant = growth.harvestableByHand &&
+                                      ((bool)growth.harvestDrop || (bool)growth.dropsFromLootTable) &&
+                                      tileObj.tileObjectChest == null &&
+                                      tileObj.tileObjectItemChanger == null;
+            if (isFarmCrop || isHandHarvestPlant)
+                return false;
+
             // Check if harvestable (not manually harvestable check - we want auto-harvest)
             int currentStatus = inside != null
                 ? inside.houseMapOnTileStatus[xPos, yPos]
