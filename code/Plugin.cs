@@ -667,14 +667,14 @@ namespace Autom8er
                 AutomationCreditHelper.TryGrantOutputCredit(sourceTileObjectId, resultItemId, stackAmount);
             };
 
-            if (ConveyorHelper.TryDepositToAdjacentChest(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
+            if (ConveyorHelper.TryDepositToAdjacentChestLegacy(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
             {
                 Plugin.Log.LogInfo("Autom8er: Machine output -> " + Inventory.Instance.allItems[resultItemId].itemName);
                 return false;
             }
 
             // Priority 2: Via Black Marble Path conveyor network
-            if (ConveyorHelper.TryDepositViaConveyorPath(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
+            if (ConveyorHelper.TryDepositViaConveyorPathLegacy(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
             {
                 Plugin.Log.LogInfo("Autom8er: Machine output via conveyor -> " + Inventory.Instance.allItems[resultItemId].itemName);
                 return false;
@@ -701,8 +701,12 @@ namespace Autom8er
             // For crab pots, use 2-tile radius since they're placed in water
             int searchRadius = __instance.isCrabPot ? 2 : 1;
 
-            // Find chest within search radius
-            Chest targetChest = HarvestHelper.FindAdjacentChestForHarvest(xPos, yPos, inside, searchRadius);
+            // Find chest within search radius. Some non-farm natural harvestables
+            // are explicitly forced into a nearby green VacuFarm crate while still
+            // using the vanilla harvest() path.
+            Chest targetChest = HarvestHelper.CurrentHarvestForcedChest;
+            if (targetChest == null)
+                targetChest = HarvestHelper.FindAdjacentChestForHarvest(xPos, yPos, inside, searchRadius);
             if (targetChest == null)
                 return true; // No chest, let original harvest drop items on ground
 
@@ -716,28 +720,26 @@ namespace Autom8er
                 int itemId = __instance.getCrabTrapDrop(xPos, yPos);
                 if (itemId != -1)
                 {
-                    ConveyorHelper.OutputDestination itemDestination = HarvestHelper.FindBestDestinationForHarvestOutput(xPos, yPos, inside, itemId, searchRadius);
-                    if (itemDestination != null)
+                    int slotCheck = ConveyorHelper.FindSlotForItem(targetChest, itemId);
+                    if (slotCheck != -1)
                     {
                         harvestedAny = true;
                         int capturedItemId = itemId;
-                        Chest capturedChest = itemDestination.chest;
-                        int capturedRouteX = itemDestination.routeX;
-                        int capturedRouteY = itemDestination.routeY;
+                        Chest capturedChest = targetChest;
                         HouseDetails capturedInside = inside;
                         System.Action depositHarvest = () =>
                         {
                             if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1,
                                 () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1)))
                             {
-                                ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
+                                ConveyorHelper.FallbackDepositToAnyChestLegacy(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
                                     () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1));
                             }
                         };
 
                         ConveyorAnimator.AnimateTransfer(itemId, 1,
                             new Vector2Int(xPos, yPos),
-                            new Vector2Int(capturedRouteX, capturedRouteY), inside, depositHarvest,
+                            new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
                             HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
 
                         Plugin.Log.LogInfo("Autom8er: Crab pot harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
@@ -759,28 +761,26 @@ namespace Autom8er
 
                         for (int i = 0; i < numSpots; i++)
                         {
-                            ConveyorHelper.OutputDestination itemDestination = HarvestHelper.FindBestDestinationForHarvestOutput(xPos, yPos, inside, itemId, searchRadius);
-                            if (itemDestination != null)
+                            int slotCheck = ConveyorHelper.FindSlotForItem(targetChest, itemId);
+                            if (slotCheck != -1)
                             {
                                 harvestedAny = true;
                                 int capturedItemId = itemId;
-                                Chest capturedChest = itemDestination.chest;
-                                int capturedRouteX = itemDestination.routeX;
-                                int capturedRouteY = itemDestination.routeY;
+                                Chest capturedChest = targetChest;
                                 HouseDetails capturedInside = inside;
                                 System.Action depositHarvest = () =>
                                 {
                                     if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1,
                                         () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1)))
                                     {
-                                        ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
+                                        ConveyorHelper.FallbackDepositToAnyChestLegacy(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
                                             () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1));
                                     }
                                 };
 
                                 ConveyorAnimator.AnimateTransfer(itemId, 1,
                                     new Vector2Int(xPos, yPos),
-                                    new Vector2Int(capturedRouteX, capturedRouteY), inside, depositHarvest,
+                                    new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
                                     HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
 
                                 Plugin.Log.LogInfo("Autom8er: Harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
@@ -803,28 +803,26 @@ namespace Autom8er
                             int itemId = Inventory.Instance.getInvItemId(dropItem);
                             if (itemId != -1)
                             {
-                                ConveyorHelper.OutputDestination itemDestination = HarvestHelper.FindBestDestinationForHarvestOutput(xPos, yPos, inside, itemId, searchRadius);
-                                if (itemDestination != null)
+                                int slotCheck = ConveyorHelper.FindSlotForItem(targetChest, itemId);
+                                if (slotCheck != -1)
                                 {
                                     harvestedAny = true;
                                     int capturedItemId = itemId;
-                                    Chest capturedChest = itemDestination.chest;
-                                    int capturedRouteX = itemDestination.routeX;
-                                    int capturedRouteY = itemDestination.routeY;
+                                    Chest capturedChest = targetChest;
                                     HouseDetails capturedInside = inside;
                                     System.Action depositHarvest = () =>
                                     {
                                         if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1,
                                             () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1)))
                                         {
-                                            ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
+                                            ConveyorHelper.FallbackDepositToAnyChestLegacy(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
                                                 () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1));
                                         }
                                     };
 
                                     ConveyorAnimator.AnimateTransfer(itemId, 1,
                                         new Vector2Int(xPos, yPos),
-                                        new Vector2Int(capturedRouteX, capturedRouteY), inside, depositHarvest,
+                                        new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
                                         HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
 
                                     Plugin.Log.LogInfo("Autom8er: Harvest (loot) -> chest: " + Inventory.Instance.allItems[itemId].itemName);
@@ -907,7 +905,7 @@ namespace Autom8er
 
             ConveyorHelper.ActivateAllOutdoorAutomationChests();
             Plugin.Log.LogInfo(startLog);
-            HarvestHelper.ProcessHarvestableMachines();
+            yield return WorldManager.Instance.StartCoroutine(HarvestHelper.ProcessHarvestableMachines());
             yield return new WaitForSeconds(DAY_CHANGE_PHASE_DELAY_SECONDS);
             FishPondHelper.ProcessPondAndTerrariumOutput();
             yield return new WaitForSeconds(DAY_CHANGE_PHASE_DELAY_SECONDS);
@@ -955,12 +953,20 @@ namespace Autom8er
     {
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
-        private const int DAY_CHANGE_ANIMATION_BATCH_SIZE = 100;
+        private const int DAY_CHANGE_ANIMATION_BATCH_SIZE = 50;
         private const float DAY_CHANGE_ANIMATION_BATCH_DELAY = 0.2f;
+        private const int DAY_CHANGE_HARVEST_BATCH_SIZE = 50;
+        private const float DAY_CHANGE_HARVEST_BATCH_DELAY = 0.2f;
         private static Dictionary<long, int> dayChangeAnimationCounts = new Dictionary<long, int>();
+
+        private class HarvestBatchState
+        {
+            public int harvestedSinceYield;
+        }
 
         // Used to pass inside context from TryAutoHarvestAt to HarvestPatch
         public static HouseDetails CurrentHarvestInside = null;
+        public static Chest CurrentHarvestForcedChest = null;
 
         public static void ResetDayChangeAnimationStagger()
         {
@@ -1018,7 +1024,10 @@ namespace Autom8er
                             continue;
 
                         Chest chest = ConveyorHelper.FindChestAt(checkX, checkY, inside);
-                        if (chest != null && !ConveyorHelper.IsSpecialContainer(checkX, checkY, inside))
+                        if (chest != null &&
+                            !ConveyorHelper.IsSpecialContainer(checkX, checkY, inside) &&
+                            !ConveyorHelper.IsFilterCrate(checkX, checkY, inside) &&
+                            !ConveyorHelper.IsVacuumCrate(checkX, checkY, inside))
                         {
                             return chest;
                         }
@@ -1093,7 +1102,11 @@ namespace Autom8er
                         continue;
 
                     Chest chest = ConveyorHelper.FindChestAt(adjX, adjY, null);
-                    if (chest != null && !ConveyorHelper.IsSpecialContainer(adjX, adjY, null) && !ConveyorHelper.IsInputOnlyContainer(adjX, adjY, null))
+                    if (chest != null &&
+                        !ConveyorHelper.IsSpecialContainer(adjX, adjY, null) &&
+                        !ConveyorHelper.IsInputOnlyContainer(adjX, adjY, null) &&
+                        !ConveyorHelper.IsFilterCrate(adjX, adjY, null) &&
+                        !ConveyorHelper.IsVacuumCrate(adjX, adjY, null))
                     {
                         return chest;
                     }
@@ -1157,19 +1170,19 @@ namespace Autom8er
             return true;
         }
 
-        // Scan for harvestable machines and auto-trigger harvest
-        public static int ProcessHarvestableMachines()
+        // Scan for harvestable machines and auto-trigger harvest.
+        // This runs in batches so large hive/key-cutter arrays do not spike the frame.
+        public static System.Collections.IEnumerator ProcessHarvestableMachines()
         {
             if (!NetworkMapSharer.Instance.isServer)
-                return 0;
+                yield break;
 
             ResetDayChangeAnimationStagger();
 
             HashSet<long> checkedPositions = new HashSet<long>();
-            int harvestedCount = 0;
+            HarvestBatchState batchState = new HarvestBatchState();
 
-            // Create a copy of the list to avoid "Collection was modified" exception
-            List<Chest> chestsCopy = new List<Chest>(ContainerManager.manage.activeChests);
+            List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChests();
 
             // Scan machines adjacent to chests and conveyor paths
             foreach (Chest chest in chestsCopy)
@@ -1184,7 +1197,7 @@ namespace Autom8er
                     inside = HouseManager.manage.getHouseInfoIfExists(chest.insideX, chest.insideY);
                 }
 
-                if (ConveyorHelper.IsInputOnlyContainer(chest.xPos, chest.yPos, inside))
+                if (!ConveyorHelper.IsGenericAutomationRootContainer(chest.xPos, chest.yPos, inside))
                     continue;
 
                 // Check tiles in 2-tile radius for harvestable machines
@@ -1211,31 +1224,28 @@ namespace Autom8er
                         long key = ((long)checkX << 32) | (uint)checkY;
                         if (!checkedPositions.Contains(key))
                         {
-                            harvestedCount += ScanConnectedHarvestArray(checkX, checkY, inside, checkedPositions);
+                            yield return ScanConnectedHarvestArray(checkX, checkY, inside, checkedPositions, batchState);
                         }
                     }
                 }
 
                 // Also scan machines adjacent to conveyor tiles connected to this chest
-                harvestedCount += ScanConveyorPathForHarvestables(chest.xPos, chest.yPos, inside, checkedPositions);
+                yield return ScanConveyorPathForHarvestables(chest.xPos, chest.yPos, inside, checkedPositions, batchState);
             }
-
-            return harvestedCount;
         }
 
         // Scan along conveyor path and check all adjacent tiles for harvestable machines
-        private static int ScanConveyorPathForHarvestables(int startX, int startY, HouseDetails inside, HashSet<long> checkedPositions)
+        private static System.Collections.IEnumerator ScanConveyorPathForHarvestables(int startX, int startY, HouseDetails inside, HashSet<long> checkedPositions, HarvestBatchState batchState)
         {
             if (Plugin.ConveyorTileType < 0)
-                return 0;
+                yield break;
 
             // Conveyor paths not supported inside houses
             if (inside != null)
-                return 0;
+                yield break;
 
             HashSet<long> visitedConveyors = new HashSet<long>();
             Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
-            int harvestedCount = 0;
 
             // Start by checking adjacent conveyor tiles from chest
             for (int i = 0; i < 4; i++)
@@ -1284,7 +1294,7 @@ namespace Autom8er
                         long machineKey = ((long)checkX << 32) | (uint)checkY;
                         if (!checkedPositions.Contains(machineKey))
                         {
-                            harvestedCount += ScanConnectedHarvestArray(checkX, checkY, null, checkedPositions);
+                            yield return ScanConnectedHarvestArray(checkX, checkY, null, checkedPositions, batchState);
                         }
                     }
                 }
@@ -1309,11 +1319,9 @@ namespace Autom8er
                     }
                 }
             }
-
-            return harvestedCount;
         }
 
-        private static int ScanConnectedHarvestArray(int seedX, int seedY, HouseDetails inside, HashSet<long> checkedPositions)
+        private static System.Collections.IEnumerator ScanConnectedHarvestArray(int seedX, int seedY, HouseDetails inside, HashSet<long> checkedPositions, HarvestBatchState batchState)
         {
             int mapW = inside != null ? inside.houseMapOnTile.GetLength(0) : WorldManager.Instance.onTileMap.GetLength(0);
             int mapH = inside != null ? inside.houseMapOnTile.GetLength(1) : WorldManager.Instance.onTileMap.GetLength(1);
@@ -1322,11 +1330,10 @@ namespace Autom8er
             int rootY;
             int tileObjectId;
             if (!TryGetHarvestArrayRoot(seedX, seedY, inside, out rootX, out rootY, out tileObjectId))
-                return 0;
+                yield break;
 
             Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
             HashSet<long> queuedRoots = new HashSet<long>();
-            int harvestedCount = 0;
 
             long seedKey = ((long)rootX << 32) | (uint)rootY;
             queue.Enqueue((rootX, rootY));
@@ -1341,7 +1348,14 @@ namespace Autom8er
 
                 checkedPositions.Add(currentKey);
                 if (TryAutoHarvestAt(currentX, currentY, inside))
-                    harvestedCount++;
+                {
+                    batchState.harvestedSinceYield++;
+                    if (batchState.harvestedSinceYield >= DAY_CHANGE_HARVEST_BATCH_SIZE)
+                    {
+                        batchState.harvestedSinceYield = 0;
+                        yield return new WaitForSeconds(DAY_CHANGE_HARVEST_BATCH_DELAY);
+                    }
+                }
 
                 TileObject currentTileObj = WorldManager.Instance.allObjects[tileObjectId];
                 TileObjectGrowthStages currentGrowth = currentTileObj != null ? currentTileObj.tileObjectGrowthStages : null;
@@ -1377,8 +1391,6 @@ namespace Autom8er
                     }
                 }
             }
-
-            return harvestedCount;
         }
 
         private static bool TryGetHarvestArrayRoot(int xPos, int yPos, HouseDetails inside, out int rootX, out int rootY, out int tileObjectId)
@@ -1428,10 +1440,10 @@ namespace Autom8er
             if (growth.spawnsFarmAnimal)
                 return false;
 
-            // Only skip harvests that are explicitly owned by a nearby VacuFarm crate.
-            // A broader plant-style check accidentally swallowed normal harvest machines
-            // like hives and crab pots from the standard day-change machine path.
-            if (VacuumCrateHelper.IsOwnedByVacuumCrate(xPos, yPos, inside, tileObj, growth))
+            bool isFarmCrop = growth.needsTilledSoil || growth.isAPlantSproutFromAFarmPlant(tileObj.tileObjectId);
+
+            // Farm crops are owned by the dedicated VacuFarm day-change path.
+            if (isFarmCrop && VacuumCrateHelper.IsOwnedByVacuumCrate(xPos, yPos, inside, tileObj, growth))
                 return false;
 
             // Check if harvestable (not manually harvestable check - we want auto-harvest)
@@ -1448,12 +1460,19 @@ namespace Autom8er
 
             // IMPORTANT: Only harvest if we have a valid output chest
             // This prevents items from being lost when no chest is nearby
-            Chest outputChest = FindAdjacentChestForHarvest(xPos, yPos, inside, searchRadius);
+            Chest forcedHarvestChest = null;
+            if (!isFarmCrop && inside == null)
+            {
+                forcedHarvestChest = VacuumCrateHelper.FindOwningVacuumCrate(xPos, yPos, tileObj, growth);
+            }
+
+            Chest outputChest = forcedHarvestChest ?? FindAdjacentChestForHarvest(xPos, yPos, inside, searchRadius);
             if (outputChest == null)
                 return false;
 
             // Set the inside context for the HarvestPatch to use
             CurrentHarvestInside = inside;
+            CurrentHarvestForcedChest = forcedHarvestChest;
 
             try
             {
@@ -1494,6 +1513,7 @@ namespace Autom8er
             {
                 // Always clear the context
                 CurrentHarvestInside = null;
+                CurrentHarvestForcedChest = null;
             }
         }
     }
@@ -1551,7 +1571,7 @@ namespace Autom8er
             if (quarryNodeIds.Count == 0)
                 return 0;
 
-            List<Chest> chestsCopy = new List<Chest>(ContainerManager.manage.activeChests);
+            List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChests();
             if (chestsCopy.Count == 0)
                 return 0;
 
@@ -1573,10 +1593,7 @@ namespace Autom8er
                 if (inside != null)
                     continue;
 
-                if (ConveyorHelper.IsInputOnlyContainer(chest.xPos, chest.yPos, null))
-                    continue;
-
-                if (ConveyorHelper.IsSpecialContainer(chest.xPos, chest.yPos, null))
+                if (!ConveyorHelper.IsGenericAutomationRootContainer(chest.xPos, chest.yPos, null))
                     continue;
 
                 scheduledQuarryCount += ScanChestForQuarries(chest, processedQuarries, quarryNodeIds, runGeneration);
@@ -2344,6 +2361,37 @@ namespace Autom8er
             return true;
         }
 
+        public static bool TryDepositToAdjacentChestLegacy(int machineX, int machineY, HouseDetails inside, int itemId, int stackAmount, System.Action onDepositSuccess = null)
+        {
+            DestinationSearchState state = new DestinationSearchState();
+            OutputDestination firstChestDestination = null;
+
+            for (int i = 0; i < 4; i++)
+            {
+                int checkX = machineX + dx[i];
+                int checkY = machineY + dy[i];
+
+                if (checkX < 0 || checkY < 0)
+                    continue;
+
+                TryCollectFilterDestinationAt(checkX, checkY, inside, itemId, state);
+                TryGetLegacyChestDestinationAt(checkX, checkY, inside, itemId, ref firstChestDestination);
+            }
+
+            OutputDestination filterDestination;
+            if (TryChooseBalancedFilterDestination(state.filterDestinations, itemId, inside, advanceCursor: true, out filterDestination))
+            {
+                DepositIntoChest(filterDestination.chest, filterDestination.slotIndex, inside, itemId, stackAmount, onDepositSuccess);
+                return true;
+            }
+
+            if (firstChestDestination == null)
+                return false;
+
+            DepositIntoChest(firstChestDestination.chest, firstChestDestination.slotIndex, inside, itemId, stackAmount, onDepositSuccess);
+            return true;
+        }
+
         public static bool TryDepositViaConveyorPath(int machineX, int machineY, HouseDetails inside, int itemId, int stackAmount, System.Action onDepositSuccess = null)
         {
             OutputDestination destination;
@@ -2384,6 +2432,119 @@ namespace Autom8er
             return true;
         }
 
+        public static bool TryDepositViaConveyorPathLegacy(int machineX, int machineY, HouseDetails inside, int itemId, int stackAmount, System.Action onDepositSuccess = null)
+        {
+            if (Plugin.ConveyorTileType == -1)
+                return false;
+
+            HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
+            Queue<Vector2Int> toExplore = new Queue<Vector2Int>();
+            DestinationSearchState state = new DestinationSearchState();
+            OutputDestination firstChestDestination = null;
+
+            for (int i = 0; i < 4; i++)
+            {
+                int checkX = machineX + dx[i];
+                int checkY = machineY + dy[i];
+
+                if (checkX < 0 || checkY < 0)
+                    continue;
+
+                if (!IsConveyorTile(checkX, checkY, inside))
+                    continue;
+
+                Vector2Int pos = new Vector2Int(checkX, checkY);
+                if (pathNetwork.Add(pos))
+                    toExplore.Enqueue(pos);
+            }
+
+            if (pathNetwork.Count == 0)
+                return false;
+
+            while (toExplore.Count > 0)
+            {
+                Vector2Int current = toExplore.Dequeue();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int checkX = current.x + dx[i];
+                    int checkY = current.y + dy[i];
+
+                    if (checkX < 0 || checkY < 0)
+                        continue;
+
+                    Vector2Int checkPos = new Vector2Int(checkX, checkY);
+                    if (pathNetwork.Contains(checkPos))
+                        continue;
+
+                    if (checkX == machineX && checkY == machineY)
+                        continue;
+
+                    TryCollectFilterDestinationAt(checkX, checkY, inside, itemId, state);
+                    TryGetLegacyChestDestinationAt(checkX, checkY, inside, itemId, ref firstChestDestination);
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nextX = current.x + dx[i];
+                    int nextY = current.y + dy[i];
+
+                    if (nextX < 0 || nextY < 0)
+                        continue;
+
+                    Vector2Int nextPos = new Vector2Int(nextX, nextY);
+                    if (pathNetwork.Contains(nextPos))
+                        continue;
+
+                    if (IsConveyorTile(nextX, nextY, inside))
+                    {
+                        pathNetwork.Add(nextPos);
+                        toExplore.Enqueue(nextPos);
+                    }
+                }
+            }
+
+            OutputDestination destination;
+            if (TryChooseBalancedFilterDestination(state.filterDestinations, itemId, inside, advanceCursor: true, out destination) ||
+                (destination = firstChestDestination) != null)
+            {
+                if (Plugin.AnimationEnabled)
+                {
+                    Vector2Int machinePos = new Vector2Int(machineX, machineY);
+                    Vector2Int chestPos = new Vector2Int(destination.routeX, destination.routeY);
+                    List<Vector2Int> path = ConveyorPathfinder.FindPath(machinePos, chestPos, inside);
+
+                    int capturedItemId = itemId;
+                    int capturedStack = stackAmount;
+                    int capturedChestX = destination.chest.xPos;
+                    int capturedChestY = destination.chest.yPos;
+                    HouseDetails capturedInside = inside;
+                    Chest capturedChest = destination.chest;
+
+                    System.Action onArrival = () =>
+                    {
+                        int arrivalSlot = FindSlotForItem(capturedChest, capturedItemId);
+                        if (arrivalSlot == -1)
+                        {
+                            if (!FallbackDepositToAnyChestLegacy(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess))
+                                Plugin.Log.LogWarning("Autom8er: Target chest full on arrival — no chest available, item lost!");
+                            return;
+                        }
+
+                        DepositIntoChest(capturedChest, arrivalSlot, capturedInside, capturedItemId, capturedStack, onDepositSuccess);
+                    };
+
+                    ConveyorAnimator.StartAnimation(itemId, stackAmount, path, onArrival);
+                    return true;
+                }
+
+                DepositIntoChest(destination.chest, destination.slotIndex, inside, itemId, stackAmount, onDepositSuccess);
+                return true;
+            }
+
+            return false;
+        }
+
         // Fallback for animation callbacks when the intended destination is unavailable on arrival
         public static bool FallbackDepositToAnyChest(int originX, int originY, HouseDetails inside, int itemId, int stackAmount, System.Action onDepositSuccess = null)
         {
@@ -2397,6 +2558,17 @@ namespace Autom8er
 
             DepositIntoChest(destination.chest, destination.slotIndex, inside, itemId, stackAmount, onDepositSuccess);
             return true;
+        }
+
+        public static bool FallbackDepositToAnyChestLegacy(int originX, int originY, HouseDetails inside, int itemId, int stackAmount, System.Action onDepositSuccess = null)
+        {
+            if (TryDepositToAdjacentChestLegacy(originX, originY, inside, itemId, stackAmount, onDepositSuccess))
+                return true;
+
+            if (TryDepositViaConveyorPathLegacy(originX, originY, inside, itemId, stackAmount, onDepositSuccess))
+                return true;
+
+            return false;
         }
 
         public static bool TryFindFilterDestinationFromCrate(Chest filterChest, HouseDetails inside, int itemId, out OutputDestination destination)
@@ -2415,6 +2587,7 @@ namespace Autom8er
                 return false;
 
             DestinationSearchState state = new DestinationSearchState();
+            OutputDestination firstChestDestination = null;
 
             for (int radius = 1; radius <= searchRadius; radius++)
             {
@@ -2437,15 +2610,22 @@ namespace Autom8er
                         if (checkX < 0 || checkY < 0)
                             continue;
 
-                        TryGetBestDestinationAt(checkX, checkY, inside, itemId, excludeVacuumCrates: false, state);
+                        TryCollectFilterDestinationAt(checkX, checkY, inside, itemId, state);
+                        TryGetLegacyChestDestinationAt(checkX, checkY, inside, itemId, ref firstChestDestination);
                     }
                 }
             }
 
-            if (TryFinishDestinationSearch(state, itemId, inside, advanceFilterCursor: true, out bestDestination))
+            if (TryChooseBalancedFilterDestination(state.filterDestinations, itemId, inside, advanceCursor: true, out bestDestination))
                 return true;
 
-            return TryFindBestConveyorOutputDestinationFromRadius(originX, originY, inside, itemId, searchRadius, out bestDestination);
+            if (firstChestDestination != null)
+            {
+                bestDestination = firstChestDestination;
+                return true;
+            }
+
+            return TryFindBestConveyorOutputDestinationLegacyFromRadius(originX, originY, inside, itemId, searchRadius, out bestDestination);
         }
 
         public static bool TryFindBestOutputDestinationFromNetworkAnchor(Chest anchorChest, HouseDetails inside, int itemId, bool includeAnchorChest, bool excludeVacuumCrates, out OutputDestination bestDestination)
@@ -2621,6 +2801,94 @@ namespace Autom8er
             }
 
             return TryFinishDestinationSearch(state, itemId, inside, advanceFilterCursor: true, out bestDestination);
+        }
+
+        private static bool TryFindBestConveyorOutputDestinationLegacyFromRadius(int originX, int originY, HouseDetails inside, int itemId, int startRadius, out OutputDestination bestDestination)
+        {
+            bestDestination = null;
+            if (itemId < 0 || Plugin.ConveyorTileType == -1)
+                return false;
+
+            HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
+            Queue<Vector2Int> toExplore = new Queue<Vector2Int>();
+            DestinationSearchState state = new DestinationSearchState();
+            OutputDestination firstChestDestination = null;
+
+            for (int offsetX = -startRadius; offsetX <= startRadius; offsetX++)
+            {
+                for (int offsetY = -startRadius; offsetY <= startRadius; offsetY++)
+                {
+                    if (offsetX == 0 && offsetY == 0)
+                        continue;
+
+                    if (Mathf.Abs(offsetX) + Mathf.Abs(offsetY) > startRadius)
+                        continue;
+
+                    int checkX = originX + offsetX;
+                    int checkY = originY + offsetY;
+                    if (checkX < 0 || checkY < 0)
+                        continue;
+
+                    if (!IsConveyorTile(checkX, checkY, inside))
+                        continue;
+
+                    Vector2Int pos = new Vector2Int(checkX, checkY);
+                    if (pathNetwork.Add(pos))
+                        toExplore.Enqueue(pos);
+                }
+            }
+
+            if (pathNetwork.Count == 0)
+                return false;
+
+            while (toExplore.Count > 0)
+            {
+                Vector2Int current = toExplore.Dequeue();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int checkX = current.x + dx[i];
+                    int checkY = current.y + dy[i];
+                    if (checkX < 0 || checkY < 0)
+                        continue;
+
+                    Vector2Int checkPos = new Vector2Int(checkX, checkY);
+                    if (pathNetwork.Contains(checkPos) || (checkX == originX && checkY == originY))
+                        continue;
+
+                    TryCollectFilterDestinationAt(checkX, checkY, inside, itemId, state);
+                    TryGetLegacyChestDestinationAt(checkX, checkY, inside, itemId, ref firstChestDestination);
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nextX = current.x + dx[i];
+                    int nextY = current.y + dy[i];
+                    if (nextX < 0 || nextY < 0)
+                        continue;
+
+                    Vector2Int nextPos = new Vector2Int(nextX, nextY);
+                    if (pathNetwork.Contains(nextPos))
+                        continue;
+
+                    if (IsConveyorTile(nextX, nextY, inside))
+                    {
+                        pathNetwork.Add(nextPos);
+                        toExplore.Enqueue(nextPos);
+                    }
+                }
+            }
+
+            if (TryChooseBalancedFilterDestination(state.filterDestinations, itemId, inside, advanceCursor: true, out bestDestination))
+                return true;
+
+            if (firstChestDestination != null)
+            {
+                bestDestination = firstChestDestination;
+                return true;
+            }
+
+            return false;
         }
 
         private static bool TryFindBestConveyorOutputDestinationFromRadius(int originX, int originY, HouseDetails inside, int itemId, int startRadius, out OutputDestination bestDestination)
@@ -2825,11 +3093,42 @@ namespace Autom8er
             return destination != null;
         }
 
+        private static void TryGetLegacyChestDestinationAt(int checkX, int checkY, HouseDetails inside, int itemId, ref OutputDestination firstChestDestination)
+        {
+            if (firstChestDestination != null)
+                return;
+
+            if (IsInputOnlyContainer(checkX, checkY, inside) ||
+                IsSpecialContainer(checkX, checkY, inside) ||
+                IsFilterCrate(checkX, checkY, inside) ||
+                IsVacuumCrate(checkX, checkY, inside))
+                return;
+
+            Chest chest = FindChestAt(checkX, checkY, inside);
+            if (chest == null)
+                return;
+
+            int slotIndex = FindSlotForItem(chest, itemId);
+            if (slotIndex == -1)
+                return;
+
+            firstChestDestination = new OutputDestination
+            {
+                chest = chest,
+                slotIndex = slotIndex,
+                routeX = chest.xPos,
+                routeY = chest.yPos
+            };
+        }
+
         private static void TryGetBestDestinationAt(int checkX, int checkY, HouseDetails inside, int itemId, bool excludeVacuumCrates, DestinationSearchState state)
         {
             TryCollectFilterDestinationAt(checkX, checkY, inside, itemId, state);
 
-            if (IsInputOnlyContainer(checkX, checkY, inside) || IsSpecialContainer(checkX, checkY, inside) || IsFilterCrate(checkX, checkY, inside))
+            if (IsInputOnlyContainer(checkX, checkY, inside) ||
+                IsSpecialContainer(checkX, checkY, inside) ||
+                IsFilterCrate(checkX, checkY, inside) ||
+                IsVacuumCrate(checkX, checkY, inside))
                 return;
 
             Chest chest = FindChestAt(checkX, checkY, inside);
@@ -3064,7 +3363,7 @@ namespace Autom8er
                 if (IsInputOnlyContainer(checkX, checkY, inside))
                     continue;
 
-                if (IsSpecialContainer(checkX, checkY, inside))
+                if (IsSpecialContainer(checkX, checkY, inside) || IsVacuumCrate(checkX, checkY, inside))
                     continue;
 
                 Chest chest = FindChestAt(checkX, checkY, inside);
@@ -3152,7 +3451,7 @@ namespace Autom8er
                     if (IsInputOnlyContainer(checkX, checkY, inside))
                         continue;
 
-                    if (IsSpecialContainer(checkX, checkY, inside))
+                    if (IsSpecialContainer(checkX, checkY, inside) || IsVacuumCrate(checkX, checkY, inside))
                         continue;
 
                     Chest chest = FindChestAt(checkX, checkY, inside);
@@ -3221,6 +3520,19 @@ namespace Autom8er
         public static bool IsVacuumCrate(int x, int y, HouseDetails inside)
         {
             return GetTileObjectId(x, y, inside) == Plugin.GREEN_CRATE_TILE_ID;
+        }
+
+        public static bool IsGenericAutomationRootContainer(int x, int y, HouseDetails inside)
+        {
+            if (IsInputOnlyContainer(x, y, inside) ||
+                IsFilterCrate(x, y, inside) ||
+                IsVacuumCrate(x, y, inside) ||
+                IsSpecialContainer(x, y, inside))
+            {
+                return false;
+            }
+
+            return FindChestAt(x, y, inside) != null;
         }
 
         public static bool ChestHasItems(Chest chest)
@@ -3451,6 +3763,38 @@ namespace Autom8er
                     ContainerManager.manage.getChestForRecycling(x, y, null);
                 }
             }
+        }
+
+        public static List<Chest> CollectOutdoorAutomationRootChests()
+        {
+            List<Chest> roots = new List<Chest>();
+            if (WorldManager.Instance == null || ContainerManager.manage == null)
+                return roots;
+
+            int mapW = WorldManager.Instance.onTileMap.GetLength(0);
+            int mapH = WorldManager.Instance.onTileMap.GetLength(1);
+            HashSet<long> seen = new HashSet<long>();
+
+            for (int x = 0; x < mapW; x++)
+            {
+                for (int y = 0; y < mapH; y++)
+                {
+                    if (!IsGenericAutomationRootContainer(x, y, null))
+                        continue;
+
+                    Chest chest = FindChestAt(x, y, null);
+                    if (chest == null)
+                        continue;
+
+                    long key = ((long)chest.xPos << 32) | (uint)chest.yPos;
+                    if (!seen.Add(key))
+                        continue;
+
+                    roots.Add(chest);
+                }
+            }
+
+            return roots;
         }
 
         public static int FindSlotForItem(Chest chest, int itemId)
@@ -3773,7 +4117,7 @@ namespace Autom8er
                 for (int harvestIndex = 0; harvestIndex < harvestTargets.Count; harvestIndex++)
                 {
                     HarvestTarget target = harvestTargets[harvestIndex];
-                    HarvestPlantAt(target.xPos, target.yPos, target.tileObj, target.growth);
+                    HarvestVacuumTargetAt(chest, target);
                     harvested++;
 
                     bool batchComplete = ((harvestIndex + 1) % VACUUM_HARVEST_BATCH_SIZE == 0) || harvestIndex == harvestTargets.Count - 1;
@@ -3803,23 +4147,74 @@ namespace Autom8er
             if (inside != null || tileObj == null || growth == null || WorldManager.Instance == null)
                 return false;
 
+            if (growth.needsTilledSoil || growth.isAPlantSproutFromAFarmPlant(tileObj.tileObjectId))
+                return true;
+
             if (!IsVacuumHarvestCandidate(tileObj, growth, WorldManager.Instance.onTileStatusMap[xPos, yPos]))
                 return false;
 
+            return HasVacuumCrateInHarvestRange(xPos, yPos);
+        }
+
+        public static Chest FindOwningVacuumCrate(int xPos, int yPos, TileObject tileObj, TileObjectGrowthStages growth)
+        {
+            if (tileObj == null || growth == null || WorldManager.Instance == null)
+                return null;
+
+            if (!IsVacuumHarvestCandidate(tileObj, growth, WorldManager.Instance.onTileStatusMap[xPos, yPos]))
+                return null;
+
             int mapW = WorldManager.Instance.onTileMap.GetLength(0);
             int mapH = WorldManager.Instance.onTileMap.GetLength(1);
+
             int minX = Mathf.Max(0, xPos - VACUUM_HARVEST_RADIUS_TILES);
             int maxX = Mathf.Min(mapW - 1, xPos + VACUUM_HARVEST_RADIUS_TILES);
             int minY = Mathf.Max(0, yPos - VACUUM_HARVEST_RADIUS_TILES);
             int maxY = Mathf.Min(mapH - 1, yPos + VACUUM_HARVEST_RADIUS_TILES);
 
-            for (int scanX = minX; scanX <= maxX; scanX++)
+            Chest bestChest = null;
+            int bestDistance = int.MaxValue;
+
+            for (int x = minX; x <= maxX; x++)
             {
-                for (int scanY = minY; scanY <= maxY; scanY++)
+                for (int y = minY; y <= maxY; y++)
                 {
-                    if (WorldManager.Instance.onTileMap[scanX, scanY] != Plugin.GREEN_CRATE_TILE_ID)
+                    if (WorldManager.Instance.onTileMap[x, y] != Plugin.GREEN_CRATE_TILE_ID)
                         continue;
-                    return true;
+
+                    Chest chest = ConveyorHelper.FindChestAt(x, y, null);
+                    if (chest == null)
+                        continue;
+
+                    int distance = Mathf.Abs(x - xPos) + Mathf.Abs(y - yPos);
+                    if (bestChest == null || distance < bestDistance ||
+                        (distance == bestDistance && (y < bestChest.yPos || (y == bestChest.yPos && x < bestChest.xPos))))
+                    {
+                        bestChest = chest;
+                        bestDistance = distance;
+                    }
+                }
+            }
+
+            return bestChest;
+        }
+
+        private static bool HasVacuumCrateInHarvestRange(int xPos, int yPos)
+        {
+            int mapW = WorldManager.Instance.onTileMap.GetLength(0);
+            int mapH = WorldManager.Instance.onTileMap.GetLength(1);
+
+            int minX = Mathf.Max(0, xPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxX = Mathf.Min(mapW - 1, xPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minY = Mathf.Max(0, yPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxY = Mathf.Min(mapH - 1, yPos + VACUUM_HARVEST_RADIUS_TILES);
+
+            for (int x = minX; x <= maxX; x++)
+            {
+                for (int y = minY; y <= maxY; y++)
+                {
+                    if (WorldManager.Instance.onTileMap[x, y] == Plugin.GREEN_CRATE_TILE_ID)
+                        return true;
                 }
             }
 
@@ -4805,12 +5200,40 @@ namespace Autom8er
             if (!canHarvest || growth.isCrabPot || growth.mustBeInWater)
                 return false;
 
+            if (IsClassicMachineHarvestTile(tileObj.tileObjectId))
+                return false;
+
             bool isTreeFruitStyle = growth.harvestableByHand &&
                                     ((bool)growth.harvestDrop || (bool)growth.dropsFromLootTable) &&
                                     tileObj.tileObjectChest == null &&
                                     tileObj.tileObjectItemChanger == null;
 
             return isFarmCrop || isTreeFruitStyle;
+        }
+
+        private static bool IsClassicMachineHarvestTile(int tileObjectId)
+        {
+            return tileObjectId == 117 ||  // Crab Pot
+                   tileObjectId == 118 ||  // Bee House
+                   tileObjectId == 366 ||  // Worm Farm
+                   tileObjectId == 897;    // Key Cutter
+        }
+
+        private static void HarvestVacuumTargetAt(Chest owningChest, HarvestTarget target)
+        {
+            if (target.tileObj == null || target.growth == null)
+                return;
+
+            bool isFarmCrop = target.growth.needsTilledSoil ||
+                              target.growth.isAPlantSproutFromAFarmPlant(target.tileObj.tileObjectId);
+
+            if (isFarmCrop)
+            {
+                HarvestPlantAt(target.xPos, target.yPos, target.tileObj, target.growth);
+                return;
+            }
+
+            HarvestNaturalPlantAt(owningChest, target.xPos, target.yPos, target.tileObj, target.growth);
         }
 
         private static void HarvestPlantAt(int xPos, int yPos, TileObject tileObj, TileObjectGrowthStages growth)
@@ -4834,6 +5257,43 @@ namespace Autom8er
             }
 
             WorldManager.Instance.onTileChunkHasChanged(xPos, yPos);
+        }
+
+        private static void HarvestNaturalPlantAt(Chest owningChest, int xPos, int yPos, TileObject tileObj, TileObjectGrowthStages growth)
+        {
+            if (owningChest == null)
+                return;
+
+            WorldManager.Instance.lockTileClient(xPos, yPos);
+            int newStatus = WorldManager.Instance.onTileStatusMap[xPos, yPos] + growth.takeOrAddFromStateOnHarvest;
+            if (newStatus < 0)
+                newStatus = 0;
+
+            HarvestHelper.CurrentHarvestInside = null;
+            HarvestHelper.CurrentHarvestForcedChest = owningChest;
+
+            try
+            {
+                AutomationCreditHelper.TryGrantHarvestMilestone(tileObj.tileObjectId);
+                AutomationCreditHelper.TryGrantGrowthHarvestCredit(tileObj.tileObjectId);
+
+                if (growth.diesOnHarvest)
+                {
+                    NetworkMapSharer.Instance.RpcHarvestObject(-1, xPos, yPos, spawnDrop: true);
+                }
+                else
+                {
+                    NetworkMapSharer.Instance.RpcHarvestObject(newStatus, xPos, yPos, spawnDrop: true);
+                    WorldManager.Instance.onTileStatusMap[xPos, yPos] = newStatus;
+                }
+
+                WorldManager.Instance.onTileChunkHasChanged(xPos, yPos);
+            }
+            finally
+            {
+                HarvestHelper.CurrentHarvestInside = null;
+                HarvestHelper.CurrentHarvestForcedChest = null;
+            }
         }
 
         private static bool TryRemoveDropFromWorld(DroppedItem drop)
@@ -6443,7 +6903,7 @@ namespace Autom8er
             HarvestHelper.ResetDayChangeAnimationStagger();
 
             HashSet<long> checkedPonds = new HashSet<long>();
-            List<Chest> chestsCopy = new List<Chest>(ContainerManager.manage.activeChests);
+            List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChests();
             int extractedCount = 0;
 
             foreach (Chest chest in chestsCopy)
@@ -6460,10 +6920,7 @@ namespace Autom8er
                 if (inside != null)
                     continue;
 
-                if (ConveyorHelper.IsSpecialContainer(chest.xPos, chest.yPos, null))
-                    continue;
-
-                if (ConveyorHelper.IsInputOnlyContainer(chest.xPos, chest.yPos, null))
+                if (!ConveyorHelper.IsGenericAutomationRootContainer(chest.xPos, chest.yPos, null))
                     continue;
 
                 // Check radius around chest for ponds/terrariums

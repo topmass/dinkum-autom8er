@@ -10,7 +10,7 @@
 
 ## Features Summary
 1. **Auto Input/Output** - Chests next to machines automatically feed inputs and receive outputs
-2. **White Crates = INPUT ONLY** - White crates/chests feed machines but won't receive outputs
+2. **White Crates = INPUT ONLY** - White crates feed machines but won't receive outputs
 3. **Conveyor Belt System** - Black Marble Path (configurable) routes items between distant chests and machines
 4. **Conveyor Visual Animations** - Items visually slide along conveyor paths; transfer happens on arrival
 5. **Silo Auto-Fill** - Silos fill from chests with Animal Food (5 staggered bag animations per tick)
@@ -24,8 +24,8 @@
 13. **Auto Placer Support** - Auto Placers function as standard automation chests
 14. **Stackable Critters** - All underwater creatures become stackable (configurable, default on)
 15. **Quarry Auto-Harvest** - Vanilla quarry day-change nodes can be auto-harvested into Autom8er chest/conveyor networks
-16. **Green Crates = Vacuum Crates** - Green crates harvest and vacuum nearby drops, then pass them into the connected network
-17. **Black Crates = Filter Crates** - Black crates hold sample items and route matching network items into a touching storage chest
+16. **Green Crates = VacuFarm Crates** - Green crates harvest/vacuum nearby farm outputs, can till/fertilize/plant, and pass outputs into the connected network
+17. **Black Crates = Filter Crates** - Black crates hold sample items and route matching network items into a touching storage chest or green VacuFarm crate
 
 ---
 
@@ -36,10 +36,10 @@
 |----|------|---------|
 | 302 | Silo | 2x2 multi-tile, holds 200 Animal Food |
 | 417 | White Wooden Crate | INPUT ONLY container |
-| 430 | White Wooden Chest | INPUT ONLY container |
+| 430 | White Wooden Chest | Standard chest |
 | 410 | Black Wooden Crate | Filter crate root for routed storage |
-| 421 | Black Wooden Chest | Legacy output-only chest |
-| 412 | Green Wooden Crate | Vacuum crate |
+| 421 | Black Wooden Chest | Standard chest |
+| 412 | Green Wooden Crate | VacuFarm crate |
 | 985 | Egg Incubator | Growth stage object, accepts fertilized eggs |
 | 190 | Quarry | Vanilla quarry root tile used by quarry auto-harvest |
 
@@ -84,7 +84,8 @@ Autom8er namespace
 │   ├── Config: ConveyorTileItemId, KeepOneItem, ScanInterval, SiloFillSpeed,
 │   │          AutoFeedPonds, HoldOutputForBreeding, AnimationEnabled, AnimationSpeed,
 │   │          StackableCritters
-│   ├── Constants: WHITE_CRATE_TILE_ID (417), WHITE_CHEST_TILE_ID (430)
+│   ├── Constants: WHITE_CRATE_TILE_ID (417), WHITE_CHEST_TILE_ID (430),
+│   │          BLACK_CRATE_TILE_ID (410), GREEN_CRATE_TILE_ID (412)
 │   ├── Awake() - Init config, apply Harmony patches
 │   ├── Update() - ConveyorAnimator.UpdateAnimations() + scan timer + ProcessAllChests
 │   ├── OnDestroy() - ConveyorAnimator.ClearAllAnimations() + harmony.UnpatchSelf()
@@ -92,7 +93,7 @@ Autom8er namespace
 │   ├── ApplyStackableCritters() - One-time: sets isStackable=true on all underwaterCreature items
 │   └── ProcessAllChests() - Main loop (ORDER MATTERS):
 │       1. FilterCrateHelper.TryPullFilteredItemsFromNetwork for black crates
-│       2. VacuumCrateHelper.TryVacuumNearbyDrops / TryFlushStoredItemsToNetwork for green crates
+│       2. VacuumCrateHelper.TryVacuumNearbyDrops / TryFlushStoredItemsToNetwork / TryProcessFarmTile for green crates
 │       3. FishPondHelper.TryFeedPondsAndTerrariums ← MUST BE FIRST among chest-fed systems (see Rule 7)
 │       4. TryFeedAdjacentMachine (furnaces, etc)
 │       5. TryFeedMachineViaConveyorPath (furnaces via conveyor)
@@ -120,7 +121,9 @@ Autom8er namespace
 ├── NewDayHarvestPatch [HarmonyPatch]
 │   └── Postfix on WorldManager.refreshAllChunksNewDay()
 │       - 2s delay via coroutine (wait for chunk refresh)
-│       - Calls HarvestHelper.ProcessHarvestableMachines()
+│       - Runs phased day-change processing with existing phase gaps:
+│         harvest machines → 1.0s → ponds/terrariums → 1.0s → quarries → 0.5s → VacuFarm
+│       - Calls HarvestHelper.ProcessHarvestableMachines() as a coroutine
 │       - Calls FishPondHelper.ProcessPondAndTerrariumOutput()
 │       - Calls QuarryHelper.ProcessDayChangeQuarries()
 │
@@ -158,7 +161,10 @@ Autom8er namespace
 │   │   └── Triggers QueueAutoSorterUpdate if target is Auto Sorter
 │   ├── FindAdjacentChestForHarvest() - Find output chest nearby
 │   ├── FindChestViaConveyorPath() - Find chest via conveyor BFS
-│   └── Day-change animation stagger helpers - Batch 100 outputs per chest, add 0.2s per batch, no hard output cap
+│   └── Day-change harvest batching:
+│       - Classic machine arrays process in 50-machine waves with a 0.2s coroutine pause between waves
+│       - Conveyor animation launch stagger is also 50 outputs per chest with a 0.2s delay per batch
+│       - No hard connected-network scan cap and no hard total-output cap
 │
 ├── ConveyorHelper (static class)
 │   ├── TryFeedAdjacentMachine() - Direct chest → machine
@@ -174,10 +180,12 @@ Autom8er namespace
 │   ├── TryChooseBalancedFilterDestination() - Stable round-robin selection across a filter group
 │   ├── ClearFilterDistributionState() - Reset splitter cursors on save/load
 │   ├── IsConveyorTile() - Check if tile is conveyor path
-│   ├── IsInputOnlyContainer() - Check for white crate/chest
-│   ├── IsFilterCrate() - Check for black crates
+│   ├── IsInputOnlyContainer() - Check for white crates only
+│   ├── IsFilterCrate() - Check for black crates only
+│   ├── IsVacuumCrate() - Check for green crates only
 │   ├── IsSpecialContainer() - Exclude fish ponds, terrariums, auto placers, etc.
 │   ├── TryFindBestOutputDestinationFromNetworkAnchor() - Balanced filter route, then matching stack, then empty chest
+│   │   └── Generic destination searches must skip green VacuFarm crates unless a black filter crate is explicitly routing into them
 │   ├── TryFindFilterDestinationFromCrate() - Resolve a black crate's touching storage chest
 │   ├── FindChestAt() - Get Chest object at position
 │   │   └── Filters out tileObjectItemChanger (gacha machines, etc.)
@@ -252,8 +260,9 @@ Autom8er namespace
 │   ├── Green crates only
 │   ├── ProcessDayChangeVacuumHarvests() - Day-change crop/tree harvest wave runner
 │   ├── TryVacuumNearbyDrops() - Suck nearby drops into the crate, then route them onward
+│   ├── TryProcessFarmTile() - Till/fertilize/plant nearby farm tiles during normal scan passes
 │   ├── TryFlushStoredItemsToNetwork() - Push one grouped chunk back out of the green crate per scan pass
-│   └── Uses routed output destinations, so filtered black-crate routes outrank generic storage
+│   └── Uses routed output destinations, so filtered black-crate routes outrank generic storage, but generic network destinations must not treat green crates as normal storage
 │
 ├── FilterCrateHelper (static class)
 │   ├── Black crates only
@@ -752,7 +761,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
-- **Current `main` (unversioned after 1.6.1)** - Green vacuum crates harvest crops/trees and vacuum nearby drops into routed conveyor networks. Black crates act as filter heads with touching storage chests, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Vacuum and filter exports now emit grouped chunks per scan pass instead of local burst scheduling.
+- **Current `main` (unversioned after 1.6.1)** - Green VacuFarm crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated VacuFarm day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green VacuFarm crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Vacuum and filter exports now emit grouped chunks per scan pass instead of local burst scheduling. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not VacuFarm-owned, and now process in 50-machine / 0.2s waves to smooth heavy honey days.
 - **1.6.1** - Fixed load-in catch-up processing so existing day-change outputs now run after loading into a save once the world, player, and chests are ready. Added fixed 1 second phasing between day-change harvest systems, quarry mining credit, and a subtle conveyor animation polish so items travel 30% into the destination tile before vanishing.
 - **1.5.2** - Large single-chest day-change arrays now scan through the full connected harvest network with no arbitrary connected-array/path scan cutoffs. Day-change conveyor launches are staggered in 100-item / 0.2s batches per destination chest so 1000+ machine arrays stay visual while reducing the launch spike.
 - **1.5.1** - Fixed player credit across all automation paths. Automated machine outputs now properly count for player progression when deposited into storage. Bee houses, key cutters, worm farms, crab pots, fish ponds, and bug terrariums also grant proper automation credit. Improved stability for large machine arrays.
@@ -792,6 +801,45 @@ Rules:
 2. The touching regular chest is the real storage destination.
 3. The filter crate must never pull back out of its own touching destination chest.
 4. Durability items in the black crate are filter keys only and must never be normalized or duplicated.
+
+### Special Crate Behaviors Apply To Crates Only
+Colored specialty behavior is crate-only. Colored chests must stay ordinary storage unless the user explicitly asks for a chest-specific feature.
+
+Rules:
+1. White crates are input-only. White chests are standard chests.
+2. Black crates are filter crates. Black chests are standard chests.
+3. Green crates are VacuFarm crates. Green chests are standard chests.
+
+### Green VacuFarm Crates Are Not Generic Storage Destinations
+Green crates may receive items through explicit filter routing and their own vacuum/farmer flows, but they must not act like ordinary conveyor destination chests.
+
+Rules:
+1. Generic machine and harvest output searches must skip green crates.
+2. Generic fallback chest searches must skip green crates.
+3. The only normal path that should intentionally put items into a green crate is black filter routing for farmer-managed inputs like seeds and fertilizer.
+4. If a green crate receives a harvest output through a generic path, that is a bug and usually means a destination helper forgot to exclude vacuum crates.
+
+### Farm Crops Are Never Generic Machine Harvests
+Farm crops and natural foraging plant outputs belong to the VacuFarm system, not the generic day-change machine harvest path.
+
+Rules:
+1. Generic `TryAutoHarvestAt()` must never own crop/tree harvests.
+2. Classic machine harvest routing is for hives, key cutters, worm farms, crab pots, and similar machine-style harvestables.
+3. If a crop output reaches a black crate through the classic machine path, the ownership boundary is broken.
+4. VacuFarm candidate detection must include natural foraging plants, but it must still exclude crafted machine harvestables like bee houses and key cutters.
+5. Farm crops are always VacuFarm-owned. Natural foraging plants should only be treated as VacuFarm-owned when a green crate is actually within the VacuFarm harvest radius.
+6. Do not use a "distinct harvest output" check for natural foraging plants. Bush Lime and similar fruit items are placeable and can share the same tile object ID as the harvested plant, which makes that heuristic reject valid fruit trees.
+7. The working VacuFarm tree/shrub rule is: `harvestableByHand` + (`harvestDrop` or `dropsFromLootTable`) + no chest/item changer, while explicitly excluding the classic machine harvest tile IDs (bee house, worm farm, key cutter, crab pot).
+8. Natural foraging plants must still use the vanilla right-click harvest chain (`RpcHarvestObject(...)` with `spawnDrop: true`, which then calls `TileObjectGrowthStages.harvest(...)`) so the live tile updates and the fruit drop path stays vanilla-correct.
+
+### Day-Change Buffers Must Smooth The Heavy Systems
+Large day-change arrays are safe when the work itself is staggered, not just the conveyor visuals.
+
+Rules:
+1. Keep phase gaps between the major day-change systems. The current working flow is harvest machines → 1.0s → ponds/terrariums → 1.0s → quarries → 0.5s → VacuFarm.
+2. Classic machine harvest arrays like bee houses must batch the actual harvest work, not only the animation launch delay.
+3. The current working batch for classic day-change machine harvests is 50 machines with a 0.2s pause between waves.
+4. If honey days lag again, check the harvest coroutine wave size before touching the stable chest-first scan model.
 
 ### Automation Credit Must Be Granted On Successful Deposit
 Vanilla standard machines often get visible progression through a dropped-item path: machine output becomes a world drop, then the player picks it up, and the pickup applies end-of-day tally. Autom8er bypasses that whenever it routes output directly into storage. For reliable credit, award progression when the automated deposit actually succeeds, including fallback chest reroutes.
