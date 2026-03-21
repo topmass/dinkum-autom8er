@@ -121,9 +121,12 @@ Autom8er namespace
 ├── NewDayHarvestPatch [HarmonyPatch]
 │   └── Postfix on WorldManager.refreshAllChunksNewDay()
 │       - 2s delay via coroutine (wait for chunk refresh)
-│       - Runs phased day-change processing with existing phase gaps:
-│         harvest machines → 1.0s → ponds/terrariums → 1.0s → quarries → 0.5s → VacuFarm
-│       - Calls HarvestHelper.ProcessHarvestableMachines() as a coroutine
+│       - Runs phased day-change kickoff with existing phase gaps:
+│         harvest machines → 0.5s → Auto Farmers → 0.5s → ponds/terrariums → 0.5s → quarries
+│       - Phase gaps only delay the start of each system; they do not wait for full completion
+│       - Single-flight guard prevents load catch-up and day-change runs from overlapping
+│       - Calls HarvestHelper.ProcessHarvestableMachines() as a coroutine kickoff
+│       - Calls VacuumCrateHelper.ProcessDayChangeVacuumHarvests() as a coroutine kickoff
 │       - Calls FishPondHelper.ProcessPondAndTerrariumOutput()
 │       - Calls QuarryHelper.ProcessDayChangeQuarries()
 │
@@ -162,8 +165,8 @@ Autom8er namespace
 │   ├── FindAdjacentChestForHarvest() - Find output chest nearby
 │   ├── FindChestViaConveyorPath() - Find chest via conveyor BFS
 │   └── Day-change harvest batching:
-│       - Classic machine arrays process in 50-machine waves with a 0.2s coroutine pause between waves
-│       - Conveyor animation launch stagger is also 50 outputs per chest with a 0.2s delay per batch
+│       - Classic machine arrays process in 100-machine waves with a 0.2s coroutine pause between waves
+│       - Conveyor animation launch stagger is also 100 outputs per chest with a 0.2s delay per batch
 │       - No hard connected-network scan cap and no hard total-output cap
 │
 ├── ConveyorHelper (static class)
@@ -761,7 +764,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
-- **Current `main` (unversioned after 1.6.1)** - Green VacuFarm crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated VacuFarm day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green VacuFarm crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Vacuum and filter exports now emit grouped chunks per scan pass instead of local burst scheduling. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not VacuFarm-owned, and now process in 50-machine / 0.2s waves to smooth heavy honey days.
+- **Current `main` (unversioned after 1.6.1)** - Green Auto Farmer crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated Auto Farmer day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green Auto Farmer crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Vacuum and filter exports now emit grouped chunks per scan pass instead of local burst scheduling. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not Auto Farmer-owned, and now process in 100-machine / 0.2s waves to smooth heavy honey days. Day-change systems use kickoff delays only, not full completion waits.
 - **1.6.1** - Fixed load-in catch-up processing so existing day-change outputs now run after loading into a save once the world, player, and chests are ready. Added fixed 1 second phasing between day-change harvest systems, quarry mining credit, and a subtle conveyor animation polish so items travel 30% into the destination tile before vanishing.
 - **1.5.2** - Large single-chest day-change arrays now scan through the full connected harvest network with no arbitrary connected-array/path scan cutoffs. Day-change conveyor launches are staggered in 100-item / 0.2s batches per destination chest so 1000+ machine arrays stay visual while reducing the launch spike.
 - **1.5.1** - Fixed player credit across all automation paths. Automated machine outputs now properly count for player progression when deposited into storage. Bee houses, key cutters, worm farms, crab pots, fish ponds, and bug terrariums also grant proper automation credit. Improved stability for large machine arrays.
@@ -808,9 +811,9 @@ Colored specialty behavior is crate-only. Colored chests must stay ordinary stor
 Rules:
 1. White crates are input-only. White chests are standard chests.
 2. Black crates are filter crates. Black chests are standard chests.
-3. Green crates are VacuFarm crates. Green chests are standard chests.
+3. Green crates are Auto Farmer crates. Green chests are standard chests.
 
-### Green VacuFarm Crates Are Not Generic Storage Destinations
+### Green Auto Farmer Crates Are Not Generic Storage Destinations
 Green crates may receive items through explicit filter routing and their own vacuum/farmer flows, but they must not act like ordinary conveyor destination chests.
 
 Rules:
@@ -820,26 +823,27 @@ Rules:
 4. If a green crate receives a harvest output through a generic path, that is a bug and usually means a destination helper forgot to exclude vacuum crates.
 
 ### Farm Crops Are Never Generic Machine Harvests
-Farm crops and natural foraging plant outputs belong to the VacuFarm system, not the generic day-change machine harvest path.
+Farm crops and natural foraging plant outputs belong to the Auto Farmer system, not the generic day-change machine harvest path.
 
 Rules:
 1. Generic `TryAutoHarvestAt()` must never own crop/tree harvests.
 2. Classic machine harvest routing is for hives, key cutters, worm farms, crab pots, and similar machine-style harvestables.
 3. If a crop output reaches a black crate through the classic machine path, the ownership boundary is broken.
-4. VacuFarm candidate detection must include natural foraging plants, but it must still exclude crafted machine harvestables like bee houses and key cutters.
-5. Farm crops are always VacuFarm-owned. Natural foraging plants should only be treated as VacuFarm-owned when a green crate is actually within the VacuFarm harvest radius.
+4. Auto Farmer candidate detection must include natural foraging plants, but it must still exclude crafted machine harvestables like bee houses and key cutters.
+5. Farm crops are always Auto Farmer-owned. Natural foraging plants should only be treated as Auto Farmer-owned when a green crate is actually within the Auto Farmer harvest radius.
 6. Do not use a "distinct harvest output" check for natural foraging plants. Bush Lime and similar fruit items are placeable and can share the same tile object ID as the harvested plant, which makes that heuristic reject valid fruit trees.
-7. The working VacuFarm tree/shrub rule is: `harvestableByHand` + (`harvestDrop` or `dropsFromLootTable`) + no chest/item changer, while explicitly excluding the classic machine harvest tile IDs (bee house, worm farm, key cutter, crab pot).
+7. The working Auto Farmer tree/shrub rule is: `harvestableByHand` + (`harvestDrop` or `dropsFromLootTable`) + no chest/item changer, while explicitly excluding the classic machine harvest tile IDs (bee house, worm farm, key cutter, crab pot).
 8. Natural foraging plants must still use the vanilla right-click harvest chain (`RpcHarvestObject(...)` with `spawnDrop: true`, which then calls `TileObjectGrowthStages.harvest(...)`) so the live tile updates and the fruit drop path stays vanilla-correct.
 
 ### Day-Change Buffers Must Smooth The Heavy Systems
 Large day-change arrays are safe when the work itself is staggered, not just the conveyor visuals.
 
 Rules:
-1. Keep phase gaps between the major day-change systems. The current working flow is harvest machines → 1.0s → ponds/terrariums → 1.0s → quarries → 0.5s → VacuFarm.
-2. Classic machine harvest arrays like bee houses must batch the actual harvest work, not only the animation launch delay.
-3. The current working batch for classic day-change machine harvests is 50 machines with a 0.2s pause between waves.
-4. If honey days lag again, check the harvest coroutine wave size before touching the stable chest-first scan model.
+1. Keep phase gaps between the major day-change systems. The current working flow is harvest machines → 0.5s → Auto Farmers → 0.5s → ponds/terrariums → 0.5s → quarries.
+2. Phase gaps are kickoff delays only. Do not wait for the previous system to finish animating/exporting before starting the next.
+3. Classic machine harvest arrays like bee houses must batch the actual harvest work, not only the animation launch delay.
+4. The current working batch for classic day-change machine harvests is 100 machines with a 0.2s pause between waves.
+5. If honey days lag again, check the harvest coroutine wave size before touching the stable chest-first scan model.
 
 ### Automation Credit Must Be Granted On Successful Deposit
 Vanilla standard machines often get visible progression through a dropped-item path: machine output becomes a world drop, then the player picks it up, and the pickup applies end-of-day tally. Autom8er bypasses that whenever it routes output directly into storage. For reliable credit, award progression when the automated deposit actually succeeds, including fallback chest reroutes.
