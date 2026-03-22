@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.6.1")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.6.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -171,7 +171,7 @@ namespace Autom8er
             AnimationSpeed = Mathf.Clamp(configAnimationSpeed.Value, 0.5f, 10f);
             StackableCritters = configStackableCritters.Value;
 
-            Log.LogInfo("Autom8er v1.6.1 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
+            Log.LogInfo("Autom8er v1.6.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();

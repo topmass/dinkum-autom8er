@@ -18,6 +18,7 @@ codebase/Libs/*.dll
 # Nexus/BBCode drafts (keep local, do not push)
 bbcode-description.md
 mod-page.bbcode
+mod/*.zip
 
 # Keep mod DLL for distribution
 !mod/*.dll
