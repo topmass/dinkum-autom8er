@@ -970,15 +970,8 @@ namespace Autom8er
         private static readonly int[] dy = { 0, -1, 0, 1 };
         private const int DAY_CHANGE_ANIMATION_BATCH_SIZE = 100;
         private const float DAY_CHANGE_ANIMATION_BATCH_DELAY = 0.2f;
-        private const int DAY_CHANGE_HARVEST_BATCH_SIZE = 100;
-        private const float DAY_CHANGE_HARVEST_BATCH_DELAY = 0.2f;
         private static Dictionary<long, int> dayChangeAnimationCounts = new Dictionary<long, int>();
         private static bool dayChangeMachineHarvestRunning = false;
-
-        private class HarvestBatchState
-        {
-            public int harvestedSinceYield;
-        }
 
         // Used to pass inside context from TryAutoHarvestAt to HarvestPatch
         public static HouseDetails CurrentHarvestInside = null;
@@ -1200,7 +1193,6 @@ namespace Autom8er
                 ResetDayChangeAnimationStagger();
 
                 HashSet<long> checkedPositions = new HashSet<long>();
-                HarvestBatchState batchState = new HarvestBatchState();
 
                 List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChests();
 
@@ -1238,29 +1230,31 @@ namespace Autom8er
                             long key = ((long)checkX << 32) | (uint)checkY;
                             if (!checkedPositions.Contains(key))
                             {
-                                yield return ScanConnectedHarvestArray(checkX, checkY, inside, checkedPositions, batchState);
+                                ScanConnectedHarvestArray(checkX, checkY, inside, checkedPositions);
                             }
                         }
                     }
 
-                    yield return ScanConveyorPathForHarvestables(chest.xPos, chest.yPos, inside, checkedPositions, batchState);
+                    ScanConveyorPathForHarvestables(chest.xPos, chest.yPos, inside, checkedPositions);
                 }
             }
             finally
             {
                 dayChangeMachineHarvestRunning = false;
             }
+
+            yield break;
         }
 
         // Scan along conveyor path and check all adjacent tiles for harvestable machines
-        private static System.Collections.IEnumerator ScanConveyorPathForHarvestables(int startX, int startY, HouseDetails inside, HashSet<long> checkedPositions, HarvestBatchState batchState)
+        private static void ScanConveyorPathForHarvestables(int startX, int startY, HouseDetails inside, HashSet<long> checkedPositions)
         {
             if (Plugin.ConveyorTileType < 0)
-                yield break;
+                return;
 
             // Conveyor paths not supported inside houses
             if (inside != null)
-                yield break;
+                return;
 
             HashSet<long> visitedConveyors = new HashSet<long>();
             Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
@@ -1312,7 +1306,7 @@ namespace Autom8er
                         long machineKey = ((long)checkX << 32) | (uint)checkY;
                         if (!checkedPositions.Contains(machineKey))
                         {
-                            yield return ScanConnectedHarvestArray(checkX, checkY, null, checkedPositions, batchState);
+                            ScanConnectedHarvestArray(checkX, checkY, null, checkedPositions);
                         }
                     }
                 }
@@ -1339,7 +1333,7 @@ namespace Autom8er
             }
         }
 
-        private static System.Collections.IEnumerator ScanConnectedHarvestArray(int seedX, int seedY, HouseDetails inside, HashSet<long> checkedPositions, HarvestBatchState batchState)
+        private static void ScanConnectedHarvestArray(int seedX, int seedY, HouseDetails inside, HashSet<long> checkedPositions)
         {
             int mapW = inside != null ? inside.houseMapOnTile.GetLength(0) : WorldManager.Instance.onTileMap.GetLength(0);
             int mapH = inside != null ? inside.houseMapOnTile.GetLength(1) : WorldManager.Instance.onTileMap.GetLength(1);
@@ -1348,7 +1342,7 @@ namespace Autom8er
             int rootY;
             int tileObjectId;
             if (!TryGetHarvestArrayRoot(seedX, seedY, inside, out rootX, out rootY, out tileObjectId))
-                yield break;
+                return;
 
             Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
             HashSet<long> queuedRoots = new HashSet<long>();
@@ -1365,15 +1359,7 @@ namespace Autom8er
                     continue;
 
                 checkedPositions.Add(currentKey);
-                if (TryAutoHarvestAt(currentX, currentY, inside))
-                {
-                    batchState.harvestedSinceYield++;
-                    if (batchState.harvestedSinceYield >= DAY_CHANGE_HARVEST_BATCH_SIZE)
-                    {
-                        batchState.harvestedSinceYield = 0;
-                        yield return new WaitForSeconds(DAY_CHANGE_HARVEST_BATCH_DELAY);
-                    }
-                }
+                TryAutoHarvestAt(currentX, currentY, inside);
 
                 TileObject currentTileObj = WorldManager.Instance.allObjects[tileObjectId];
                 TileObjectGrowthStages currentGrowth = currentTileObj != null ? currentTileObj.tileObjectGrowthStages : null;
@@ -4048,6 +4034,7 @@ namespace Autom8er
             public int xPos;
             public int yPos;
             public int distance;
+            public int treeZoneOrder;
         }
 
         private class VacuumDropGroup
@@ -4406,7 +4393,7 @@ namespace Autom8er
                 if (itemId < 0 || stackAmount <= 0)
                     continue;
 
-                if (IsFarmerManagedItem(itemId))
+                if (ShouldRetainForAutoFarmer(chest, itemId))
                     continue;
 
                 if (!ShouldFlushStackNow(chest, itemId, stackAmount))
@@ -4509,18 +4496,28 @@ namespace Autom8er
                 return true;
             }
 
-            if (!HasHoeTool(chest))
-                return false;
-
             bool shouldTill = hasFertilizer || HasAnyCropSeed(chest);
-            if (!shouldTill)
-                return false;
-
-            if (TryFindBestFarmTile(chest, CanHoeTile, out FarmTileTarget hoeTarget))
+            if (shouldTill && HasHoeTool(chest) && TryFindBestFarmTile(chest, CanHoeTile, out FarmTileTarget hoeTarget))
             {
                 HoeTileAt(hoeTarget.xPos, hoeTarget.yPos);
                 int seedItemId = GetFirstCropSeedItemId(chest);
                 QueueFollowUpFarmActions(chest, hoeTarget.xPos, hoeTarget.yPos, hasFertilizer, seedItemId);
+                return true;
+            }
+
+            if (!HasShovelTool(chest))
+                return false;
+
+            for (int slot = 0; slot < chest.itemIds.Length; slot++)
+            {
+                int itemId = chest.itemIds[slot];
+                if (!IsTreePlantingItem(itemId))
+                    continue;
+
+                if (!TryFindBestTreePlantTile(chest, itemId, out FarmTileTarget treeTarget))
+                    continue;
+
+                PlantTreeAt(chest, slot, itemId, treeTarget.xPos, treeTarget.yPos);
                 return true;
             }
 
@@ -4704,6 +4701,11 @@ namespace Autom8er
             return FindItemSlot(chest, IsHoeToolItem) != -1;
         }
 
+        private static bool HasShovelTool(Chest chest)
+        {
+            return FindItemSlot(chest, IsShovelToolItem) != -1;
+        }
+
         private static int FindItemSlot(Chest chest, System.Func<int, bool> predicate)
         {
             if (chest == null || predicate == null)
@@ -4724,7 +4726,19 @@ namespace Autom8er
 
         private static bool IsFarmerManagedItem(int itemId)
         {
-            return IsHoeToolItem(itemId) || IsFertilizerItem(itemId) || IsCropSeedItem(itemId);
+            return IsHoeToolItem(itemId) || IsShovelToolItem(itemId) || IsFertilizerItem(itemId) || IsCropSeedItem(itemId);
+        }
+
+        private static bool ShouldRetainForAutoFarmer(Chest chest, int itemId)
+        {
+            if (IsFarmerManagedItem(itemId))
+                return true;
+
+            if (!IsTreePlantingItem(itemId) || chest == null || !HasShovelTool(chest))
+                return false;
+
+            FarmTileTarget target;
+            return TryFindBestTreePlantTile(chest, itemId, out target);
         }
 
         private static bool IsFertilizerItem(int itemId)
@@ -4744,6 +4758,18 @@ namespace Autom8er
             return item.itemName.IndexOf("Hoe", System.StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
+        private static bool IsShovelToolItem(int itemId)
+        {
+            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            if (item == null || !item.isATool || !item.hasFuel || string.IsNullOrEmpty(item.itemName))
+                return false;
+
+            return item.itemName.IndexOf("Shovel", System.StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         private static bool IsCropSeedItem(int itemId)
         {
             if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
@@ -4756,15 +4782,31 @@ namespace Autom8er
             return item.placeable.tileObjectGrowthStages.needsTilledSoil;
         }
 
+        private static bool IsTreePlantingItem(int itemId)
+        {
+            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            if (item == null || !item.burriedPlaceable || item.placeable == null || item.placeable.tileObjectGrowthStages == null)
+                return false;
+
+            return !item.placeable.tileObjectGrowthStages.needsTilledSoil;
+        }
+
         private static bool TryFindBestFarmTile(Chest chest, System.Func<int, int, bool> validator, out FarmTileTarget bestTarget)
         {
             bestTarget = null;
             if (chest == null || validator == null || WorldManager.Instance == null)
                 return false;
 
-            int[,] tileMap = WorldManager.Instance.onTileMap;
-            int mapW = tileMap.GetLength(0);
-            int mapH = tileMap.GetLength(1);
+            int[,] onTileMap = WorldManager.Instance.onTileMap;
+            int[,] tileTypeMap = WorldManager.Instance.tileTypeMap;
+            if (onTileMap == null || tileTypeMap == null)
+                return false;
+
+            int mapW = Mathf.Min(onTileMap.GetLength(0), tileTypeMap.GetLength(0));
+            int mapH = Mathf.Min(onTileMap.GetLength(1), tileTypeMap.GetLength(1));
 
             int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
             int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
@@ -4794,6 +4836,60 @@ namespace Autom8er
             }
 
             return bestTarget != null;
+        }
+
+        private static bool TryFindBestTreePlantTile(Chest chest, int itemId, out FarmTileTarget bestTarget)
+        {
+            bestTarget = null;
+            if (chest == null || !IsTreePlantingItem(itemId) || WorldManager.Instance == null)
+                return false;
+
+            int[,] onTileMap = WorldManager.Instance.onTileMap;
+            int[,] tileTypeMap = WorldManager.Instance.tileTypeMap;
+            if (onTileMap == null || tileTypeMap == null)
+                return false;
+
+            int mapW = Mathf.Min(onTileMap.GetLength(0), tileTypeMap.GetLength(0));
+            int mapH = Mathf.Min(onTileMap.GetLength(1), tileTypeMap.GetLength(1));
+
+            int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minY = Mathf.Max(0, chest.yPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxY = Mathf.Min(mapH - 1, chest.yPos + VACUUM_HARVEST_RADIUS_TILES);
+
+            for (int x = minX; x <= maxX; x++)
+            {
+                for (int y = minY; y <= maxY; y++)
+                {
+                    if (!CanPlantTreeAt(itemId, x, y))
+                        continue;
+
+                    int zoneOrder = GetTreePlantZoneOrder(chest, x, y);
+                    if (zoneOrder > 3)
+                        continue;
+
+                    int distance = Mathf.Abs(x - chest.xPos) + Mathf.Abs(y - chest.yPos);
+
+                    if (bestTarget == null ||
+                        zoneOrder < bestTarget.treeZoneOrder ||
+                        (zoneOrder == bestTarget.treeZoneOrder && distance > bestTarget.distance) ||
+                        (zoneOrder == bestTarget.treeZoneOrder && distance == bestTarget.distance && IsTreeTilePreferredInZone(chest, x, y, bestTarget.xPos, bestTarget.yPos)))
+                    {
+                        bestTarget = new FarmTileTarget
+                        {
+                            xPos = x,
+                            yPos = y,
+                            distance = distance,
+                            treeZoneOrder = zoneOrder
+                        };
+                    }
+                }
+            }
+
+            if (bestTarget != null)
+                return true;
+
+            return TryFindBestFarmTile(chest, (xPos, yPos) => CanPlantTreeAt(itemId, xPos, yPos), out bestTarget);
         }
 
         private static bool CanHoeTile(int xPos, int yPos)
@@ -4845,12 +4941,129 @@ namespace Autom8er
             return tileObjectId == -1 || tileObjectId == 30;
         }
 
+        private static bool CanPlantTreeAt(int itemId, int xPos, int yPos)
+        {
+            if (!IsTreePlantingItem(itemId) || !IsOutdoorFarmTileInRange(xPos, yPos))
+                return false;
+
+            if (ConveyorHelper.IsConveyorTile(xPos, yPos, null))
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
+            if (item.canBePlacedOntoTileType != null && item.canBePlacedOntoTileType.Length > 0)
+            {
+                bool validTileType = false;
+                for (int i = 0; i < item.canBePlacedOntoTileType.Length; i++)
+                {
+                    if (item.canBePlacedOntoTileType[i] == tileType)
+                    {
+                        validTileType = true;
+                        break;
+                    }
+                }
+
+                if (!validTileType)
+                    return false;
+            }
+
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            if (tileObjectId == -1 || tileObjectId == 30)
+                return true;
+
+            if (tileObjectId >= WorldManager.Instance.allObjectSettings.Length)
+                return false;
+
+            TileObjectSettings settings = WorldManager.Instance.allObjectSettings[tileObjectId];
+            return settings != null && settings.isGrass;
+        }
+
+        private static int GetTreePlantZoneOrder(Chest chest, int xPos, int yPos)
+        {
+            bool west = xPos < chest.xPos;
+            bool east = xPos > chest.xPos;
+            bool north = yPos < chest.yPos;
+            bool south = yPos > chest.yPos;
+
+            if (north && west)
+                return 0;
+            if (north && east)
+                return 1;
+            if (south && west)
+                return 2;
+            if (south && east)
+                return 3;
+            if (north)
+                return 4;
+            if (west)
+                return 5;
+            if (east)
+                return 6;
+            if (south)
+                return 7;
+
+            return 8;
+        }
+
+        private static bool IsTreeTilePreferredInZone(Chest chest, int candidateX, int candidateY, int currentX, int currentY)
+        {
+            int candidateZone = GetTreePlantZoneOrder(chest, candidateX, candidateY);
+            int currentZone = GetTreePlantZoneOrder(chest, currentX, currentY);
+            if (candidateZone != currentZone)
+                return candidateZone < currentZone;
+
+            switch (candidateZone)
+            {
+                case 0:
+                    if (candidateY != currentY)
+                        return candidateY < currentY;
+                    return candidateX < currentX;
+                case 1:
+                    if (candidateY != currentY)
+                        return candidateY < currentY;
+                    return candidateX > currentX;
+                case 2:
+                    if (candidateY != currentY)
+                        return candidateY > currentY;
+                    return candidateX < currentX;
+                case 3:
+                    if (candidateY != currentY)
+                        return candidateY > currentY;
+                    return candidateX > currentX;
+                case 4:
+                    if (candidateY != currentY)
+                        return candidateY < currentY;
+                    return Mathf.Abs(candidateX - chest.xPos) > Mathf.Abs(currentX - chest.xPos);
+                case 5:
+                    if (candidateX != currentX)
+                        return candidateX < currentX;
+                    return Mathf.Abs(candidateY - chest.yPos) > Mathf.Abs(currentY - chest.yPos);
+                case 6:
+                    if (candidateX != currentX)
+                        return candidateX > currentX;
+                    return Mathf.Abs(candidateY - chest.yPos) > Mathf.Abs(currentY - chest.yPos);
+                case 7:
+                    if (candidateY != currentY)
+                        return candidateY > currentY;
+                    return Mathf.Abs(candidateX - chest.xPos) > Mathf.Abs(currentX - chest.xPos);
+                default:
+                    return false;
+            }
+        }
+
         private static bool IsOutdoorFarmTileInRange(int xPos, int yPos, bool ignoreReservation = false)
         {
             if (WorldManager.Instance == null || NetworkMapSharer.Instance == null)
                 return false;
 
-            if (xPos < 0 || yPos < 0 || xPos >= WorldManager.Instance.GetMapSize() || yPos >= WorldManager.Instance.GetMapSize())
+            int[,] onTileMap = WorldManager.Instance.onTileMap;
+            int[,] tileTypeMap = WorldManager.Instance.tileTypeMap;
+            if (onTileMap == null || tileTypeMap == null)
+                return false;
+
+            if (xPos < 0 || yPos < 0 ||
+                xPos >= onTileMap.GetLength(0) || yPos >= onTileMap.GetLength(1) ||
+                xPos >= tileTypeMap.GetLength(0) || yPos >= tileTypeMap.GetLength(1))
                 return false;
 
             if (WorldManager.Instance.CheckTileClientLock(xPos, yPos))
@@ -4900,6 +5113,28 @@ namespace Autom8er
             NetworkMapSharer.Instance.RpcUpdateOnTileObject(seed.placeable.tileObjectId, xPos, yPos);
             ConsumeOneItem(chest, slot);
             AutomationCreditHelper.TryGrantPlantSeedCredit();
+        }
+
+        private static void PlantTreeAt(Chest chest, int slot, int itemId, int xPos, int yPos)
+        {
+            InventoryItem plant = Inventory.Instance.allItems[itemId];
+            if (plant == null || plant.placeable == null)
+                return;
+
+            ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
+
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            if (tileObjectId > -1 &&
+                tileObjectId < WorldManager.Instance.allObjectSettings.Length &&
+                WorldManager.Instance.allObjectSettings[tileObjectId] != null &&
+                WorldManager.Instance.allObjectSettings[tileObjectId].isGrass)
+            {
+                NetworkMapSharer.Instance.RpcUpdateOnTileObject(-1, xPos, yPos);
+            }
+
+            NetworkMapSharer.Instance.RpcUpdateOnTileObject(plant.placeable.tileObjectId, xPos, yPos);
+            ConsumeOneItem(chest, slot);
+            plant.checkForTask();
         }
 
         private static void QueueFollowUpFarmActions(Chest chest, int tileX, int tileY, bool queueFertilizer, int seedItemId)
