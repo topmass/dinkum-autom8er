@@ -19,6 +19,7 @@ codebase/Libs/*.dll
 bbcode-description.md
 mod-page.bbcode
 mod/*.zip
+mod/README.md
 
 # Keep mod DLL for distribution
 !mod/*.dll
