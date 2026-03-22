@@ -4034,7 +4034,6 @@ namespace Autom8er
             public int xPos;
             public int yPos;
             public int distance;
-            public int treeZoneOrder;
         }
 
         private class VacuumDropGroup
@@ -4807,7 +4806,6 @@ namespace Autom8er
 
             int mapW = Mathf.Min(onTileMap.GetLength(0), tileTypeMap.GetLength(0));
             int mapH = Mathf.Min(onTileMap.GetLength(1), tileTypeMap.GetLength(1));
-
             int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
             int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
             int minY = Mathf.Max(0, chest.yPos - VACUUM_HARVEST_RADIUS_TILES);
@@ -4852,44 +4850,72 @@ namespace Autom8er
             int mapW = Mathf.Min(onTileMap.GetLength(0), tileTypeMap.GetLength(0));
             int mapH = Mathf.Min(onTileMap.GetLength(1), tileTypeMap.GetLength(1));
 
+            FarmTileTarget foundTarget = null;
+            bool found = VisitFarmTilesInPriorityOrder(chest, mapW, mapH, (x, y) =>
+            {
+                if (!CanPlantTreeAt(itemId, x, y))
+                    return false;
+
+                foundTarget = new FarmTileTarget
+                {
+                    xPos = x,
+                    yPos = y
+                };
+                return true;
+            });
+
+            if (found)
+            {
+                bestTarget = foundTarget;
+                return true;
+            }
+
+            return TryFindBestFarmTile(chest, (xPos, yPos) => CanPlantTreeAt(itemId, xPos, yPos), out bestTarget);
+        }
+
+        private static bool VisitFarmTilesInPriorityOrder(Chest chest, int mapW, int mapH, System.Func<int, int, bool> visitor)
+        {
+            if (chest == null || visitor == null || mapW <= 0 || mapH <= 0)
+                return false;
+
             int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
             int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
             int minY = Mathf.Max(0, chest.yPos - VACUUM_HARVEST_RADIUS_TILES);
             int maxY = Mathf.Min(mapH - 1, chest.yPos + VACUUM_HARVEST_RADIUS_TILES);
 
-            for (int x = minX; x <= maxX; x++)
+            int westEndX = Mathf.Min(chest.xPos, maxX);
+            int eastStartX = Mathf.Max(chest.xPos + 1, minX);
+            int northEndY = Mathf.Max(chest.yPos, minY);
+            int southEndY = Mathf.Min(chest.yPos - 1, maxY);
+
+            // Always scan the active 21x21 plot from map-northwest first so the
+            // crate keeps a predictable planting order regardless of how it was moved.
+            return VisitFarmQuadrant(minX, westEndX, 1, maxY, northEndY, -1, visitor) ||
+                   VisitFarmQuadrant(maxX, eastStartX, -1, maxY, northEndY, -1, visitor) ||
+                   VisitFarmQuadrant(minX, westEndX, 1, minY, southEndY, 1, visitor) ||
+                   VisitFarmQuadrant(maxX, eastStartX, -1, minY, southEndY, 1, visitor);
+        }
+
+        private static bool VisitFarmQuadrant(int startX, int endX, int stepX, int startY, int endY, int stepY, System.Func<int, int, bool> visitor)
+        {
+            if (visitor == null || stepX == 0 || stepY == 0)
+                return false;
+
+            bool validXRange = stepX > 0 ? startX <= endX : startX >= endX;
+            bool validYRange = stepY > 0 ? startY <= endY : startY >= endY;
+            if (!validXRange || !validYRange)
+                return false;
+
+            for (int y = startY; stepY > 0 ? y <= endY : y >= endY; y += stepY)
             {
-                for (int y = minY; y <= maxY; y++)
+                for (int x = startX; stepX > 0 ? x <= endX : x >= endX; x += stepX)
                 {
-                    if (!CanPlantTreeAt(itemId, x, y))
-                        continue;
-
-                    int zoneOrder = GetTreePlantZoneOrder(chest, x, y);
-                    if (zoneOrder > 3)
-                        continue;
-
-                    int distance = Mathf.Abs(x - chest.xPos) + Mathf.Abs(y - chest.yPos);
-
-                    if (bestTarget == null ||
-                        zoneOrder < bestTarget.treeZoneOrder ||
-                        (zoneOrder == bestTarget.treeZoneOrder && distance > bestTarget.distance) ||
-                        (zoneOrder == bestTarget.treeZoneOrder && distance == bestTarget.distance && IsTreeTilePreferredInZone(chest, x, y, bestTarget.xPos, bestTarget.yPos)))
-                    {
-                        bestTarget = new FarmTileTarget
-                        {
-                            xPos = x,
-                            yPos = y,
-                            distance = distance,
-                            treeZoneOrder = zoneOrder
-                        };
-                    }
+                    if (visitor(x, y))
+                        return true;
                 }
             }
 
-            if (bestTarget != null)
-                return true;
-
-            return TryFindBestFarmTile(chest, (xPos, yPos) => CanPlantTreeAt(itemId, xPos, yPos), out bestTarget);
+            return false;
         }
 
         private static bool CanHoeTile(int xPos, int yPos)
@@ -4971,84 +4997,14 @@ namespace Autom8er
             if (tileObjectId == -1 || tileObjectId == 30)
                 return true;
 
+            if (tileObjectId < 0)
+                return false;
+
             if (tileObjectId >= WorldManager.Instance.allObjectSettings.Length)
                 return false;
 
             TileObjectSettings settings = WorldManager.Instance.allObjectSettings[tileObjectId];
             return settings != null && settings.isGrass;
-        }
-
-        private static int GetTreePlantZoneOrder(Chest chest, int xPos, int yPos)
-        {
-            bool west = xPos < chest.xPos;
-            bool east = xPos > chest.xPos;
-            bool north = yPos < chest.yPos;
-            bool south = yPos > chest.yPos;
-
-            if (north && west)
-                return 0;
-            if (north && east)
-                return 1;
-            if (south && west)
-                return 2;
-            if (south && east)
-                return 3;
-            if (north)
-                return 4;
-            if (west)
-                return 5;
-            if (east)
-                return 6;
-            if (south)
-                return 7;
-
-            return 8;
-        }
-
-        private static bool IsTreeTilePreferredInZone(Chest chest, int candidateX, int candidateY, int currentX, int currentY)
-        {
-            int candidateZone = GetTreePlantZoneOrder(chest, candidateX, candidateY);
-            int currentZone = GetTreePlantZoneOrder(chest, currentX, currentY);
-            if (candidateZone != currentZone)
-                return candidateZone < currentZone;
-
-            switch (candidateZone)
-            {
-                case 0:
-                    if (candidateY != currentY)
-                        return candidateY < currentY;
-                    return candidateX < currentX;
-                case 1:
-                    if (candidateY != currentY)
-                        return candidateY < currentY;
-                    return candidateX > currentX;
-                case 2:
-                    if (candidateY != currentY)
-                        return candidateY > currentY;
-                    return candidateX < currentX;
-                case 3:
-                    if (candidateY != currentY)
-                        return candidateY > currentY;
-                    return candidateX > currentX;
-                case 4:
-                    if (candidateY != currentY)
-                        return candidateY < currentY;
-                    return Mathf.Abs(candidateX - chest.xPos) > Mathf.Abs(currentX - chest.xPos);
-                case 5:
-                    if (candidateX != currentX)
-                        return candidateX < currentX;
-                    return Mathf.Abs(candidateY - chest.yPos) > Mathf.Abs(currentY - chest.yPos);
-                case 6:
-                    if (candidateX != currentX)
-                        return candidateX > currentX;
-                    return Mathf.Abs(candidateY - chest.yPos) > Mathf.Abs(currentY - chest.yPos);
-                case 7:
-                    if (candidateY != currentY)
-                        return candidateY > currentY;
-                    return Mathf.Abs(candidateX - chest.xPos) > Mathf.Abs(currentX - chest.xPos);
-                default:
-                    return false;
-            }
         }
 
         private static bool IsOutdoorFarmTileInRange(int xPos, int yPos, bool ignoreReservation = false)

@@ -27,6 +27,13 @@
 16. **Green Crates = VacuFarm Crates** - Green crates harvest/vacuum nearby farm outputs, can till/fertilize/plant, and pass outputs into the connected network
 17. **Black Crates = Filter Crates** - Black crates hold sample items and route matching network items into a touching storage chest or green VacuFarm crate
 
+### Green Crate Tree Mode
+- If a green crate contains a shovel and buried tree/fruit items, tree planting uses a dedicated layout pass that is separate from crop tilling/fertilizing/seed planting.
+- Crop tiles still use the original nearest-valid-tile behavior around the crate. Only shovel-based tree planting uses the fixed layout scan.
+- Tree planting scans the active 21x21 area in a fixed map-direction order: northwest quadrant first, then northeast, southwest, and southeast.
+- Within each tree quadrant, placement starts from that quadrant's outer corner and skips blocked or invalid tiles instead of failing the whole run.
+- Decorative blockers are supported. If a tile is occupied by something that cannot be safely replaced, the crate leaves it alone and keeps scanning for the next valid tile.
+
 ---
 
 ## Key IDs
