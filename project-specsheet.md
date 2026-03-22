@@ -1,7 +1,7 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** main (post-1.6.1)
+**Version:** 1.6.1
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
@@ -33,6 +33,14 @@
 - Tree planting scans the active 21x21 area in a fixed map-direction order: northwest quadrant first, then northeast, southwest, and southeast.
 - Within each tree quadrant, placement starts from that quadrant's outer corner and skips blocked or invalid tiles instead of failing the whole run.
 - Decorative blockers are supported. If a tile is occupied by something that cannot be safely replaced, the crate leaves it alone and keeps scanning for the next valid tile.
+
+### Blast Furnace Rules
+- Blast Furnace tile object ID is `581`.
+- Normal blast furnace ores still load in `5 ore` batches, but vanilla blast furnaces produce `2 ingots` from one loaded batch by running two internal output cycles before the machine is actually finished.
+- Berkonium is the exception: `5 berkonium ore -> 1 ingot`, matching normal furnace behavior.
+- Autom8er must not start a second automated load into a blast furnace while that exact blast furnace already has an active `CurrentChanger` in `WorldManager.Instance.allChangers`.
+- This active-changer guard is intentionally blast-furnace-only so normal one-cycle machine throughput stays unchanged.
+- Conveyor machine-input fallback must return the full `amountNeeded` batch if a machine is occupied on arrival. Returning `1` item is incorrect for ore loads and can silently lose ore in large arrays.
 
 ---
 

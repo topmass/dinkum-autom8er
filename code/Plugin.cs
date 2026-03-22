@@ -40,6 +40,7 @@ namespace Autom8er
 
         // TileObject IDs for colored crate-only feature blocks
         public const int GREEN_CRATE_TILE_ID = 412;
+        public const int BLAST_FURNACE_TILE_ID = 581;
 
         // Item IDs
         public const int HAR_VAC_ITEM_ID = 1728;
@@ -2085,6 +2086,9 @@ namespace Autom8er
                     if (!item.itemChange.checkIfCanBeDepositedServer(tileObjectId))
                         continue;
 
+                    if (ShouldBlockBlastFurnaceRefill(tileObjectId, item, machineX, machineY, inside))
+                        continue;
+
                     int amountNeeded = item.itemChange.getAmountNeeded(tileObjectId);
 
                     // Items with hasFuel (tools/durability) store durability in stack, not count
@@ -2256,6 +2260,9 @@ namespace Autom8er
                         if (!item.itemChange.checkIfCanBeDepositedServer(tileObjectId))
                             continue;
 
+                        if (ShouldBlockBlastFurnaceRefill(tileObjectId, item, machineX, machineY, inside))
+                            continue;
+
                         int amountNeeded = item.itemChange.getAmountNeeded(tileObjectId);
 
                         // Items with hasFuel (tools/durability) store durability in stack, not count
@@ -2323,7 +2330,7 @@ namespace Autom8er
                                     NetworkMapSharer.Instance.startTileTimerOnServer(capturedItemId, capturedMachineX, capturedMachineY, capturedInside);
                                     AutomationCreditHelper.TryGrantMachineInputCredit(capturedItemId, tileObjectId);
                                 }
-                                else if (!FallbackDepositToAnyChest(capturedMachineX, capturedMachineY, capturedInside, capturedItemId, 1))
+                                else if (!FallbackDepositToAnyChest(capturedMachineX, capturedMachineY, capturedInside, capturedItemId, amountNeeded))
                                 {
                                     Plugin.Log.LogWarning("Autom8er: Machine occupied on arrival — no chest available, item lost!");
                                 }
@@ -3578,6 +3585,42 @@ namespace Autom8er
                 status = WorldManager.Instance.onTileStatusMap[x, y];
             }
             return status == -2 || status == -1;
+        }
+
+        private static bool ShouldBlockBlastFurnaceRefill(int tileObjectId, InventoryItem item, int xPos, int yPos, HouseDetails inside)
+        {
+            if (tileObjectId != Plugin.BLAST_FURNACE_TILE_ID || item == null || item.itemChange == null)
+                return false;
+
+            if (item.itemChange.getCycles(tileObjectId) <= 1)
+                return false;
+
+            return HasActiveChangerAt(xPos, yPos, inside);
+        }
+
+        private static bool HasActiveChangerAt(int xPos, int yPos, HouseDetails inside)
+        {
+            if (WorldManager.Instance == null || WorldManager.Instance.allChangers == null)
+                return false;
+
+            for (int i = 0; i < WorldManager.Instance.allChangers.Count; i++)
+            {
+                CurrentChanger changer = WorldManager.Instance.allChangers[i];
+                if (changer == null || changer.xPos != xPos || changer.yPos != yPos)
+                    continue;
+
+                if (inside == null)
+                {
+                    if (changer.houseX == -1 && changer.houseY == -1)
+                        return true;
+                }
+                else if (changer.houseX == inside.xPos && changer.houseY == inside.yPos)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         public static Chest FindChestAt(int x, int y, HouseDetails inside)
