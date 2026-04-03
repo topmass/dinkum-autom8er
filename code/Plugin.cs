@@ -68,6 +68,7 @@ namespace Autom8er
         private const int MAX_ACTIVE_FARMER_CRATES_PER_PASS = 6;
         private const int MAX_ACTIVE_VACUUM_CRATES_PER_PASS = 4;
         private const int MAX_IDLE_VACUUM_CRATES_PER_PASS = 1;
+        private const int MAX_INTERACTING_FILTER_CRATES_PER_PASS = 2;
         private const int MAX_ACTIVE_FILTER_CRATES_PER_PASS = 8;
         private const int MAX_IDLE_FILTER_CRATES_PER_PASS = 2;
         private static bool loadCatchUpPending = false;
@@ -469,18 +470,22 @@ namespace Autom8er
             if (filterCrates == null || filterCrates.Count == 0)
                 return;
 
+            List<Chest> interactingFilterCrates = new List<Chest>();
             List<Chest> activeFilterCrates = new List<Chest>();
             List<Chest> idleFilterCrates = new List<Chest>();
 
             for (int i = 0; i < filterCrates.Count; i++)
             {
                 Chest chest = filterCrates[i];
-                if (FilterCrateHelper.ShouldUseActiveScanRate(chest))
+                if (FilterCrateHelper.IsPlayerInteracting(chest))
+                    interactingFilterCrates.Add(chest);
+                else if (FilterCrateHelper.ShouldUseActiveScanRate(chest))
                     activeFilterCrates.Add(chest);
                 else
                     idleFilterCrates.Add(chest);
             }
 
+            ProcessFilterCrateBatch(interactingFilterCrates, ref nextFilterCrateIndex, ScanInterval, MAX_INTERACTING_FILTER_CRATES_PER_PASS);
             ProcessFilterCrateBatch(activeFilterCrates, ref nextFilterCrateIndex, FILTER_ACTIVE_SCAN_INTERVAL, MAX_ACTIVE_FILTER_CRATES_PER_PASS);
             ProcessFilterCrateBatch(idleFilterCrates, ref nextIdleFilterCrateIndex, FILTER_IDLE_SCAN_INTERVAL, MAX_IDLE_FILTER_CRATES_PER_PASS);
         }
@@ -4383,10 +4388,10 @@ namespace Autom8er
             if (inside != null || tileObj == null || growth == null || WorldManager.Instance == null)
                 return false;
 
-            if (growth.needsTilledSoil || growth.isAPlantSproutFromAFarmPlant(tileObj.tileObjectId))
+            if (IsFarmCropTile(xPos, yPos, tileObj, growth))
                 return true;
 
-            if (!IsVacuumHarvestCandidate(tileObj, growth, WorldManager.Instance.onTileStatusMap[xPos, yPos]))
+            if (!IsVacuumHarvestCandidate(xPos, yPos, tileObj, growth, WorldManager.Instance.onTileStatusMap[xPos, yPos]))
                 return false;
 
             return HasVacuumCrateInHarvestRange(xPos, yPos);
@@ -4397,7 +4402,7 @@ namespace Autom8er
             if (tileObj == null || growth == null || WorldManager.Instance == null)
                 return null;
 
-            if (!IsVacuumHarvestCandidate(tileObj, growth, WorldManager.Instance.onTileStatusMap[xPos, yPos]))
+            if (!IsVacuumHarvestCandidate(xPos, yPos, tileObj, growth, WorldManager.Instance.onTileStatusMap[xPos, yPos]))
                 return null;
 
             int mapW = WorldManager.Instance.onTileMap.GetLength(0);
@@ -4796,7 +4801,7 @@ namespace Autom8er
                         continue;
 
                     TileObjectGrowthStages growth = tileObj.tileObjectGrowthStages;
-                    if (!IsVacuumHarvestCandidate(tileObj, growth, statusMap[x, y]))
+                    if (!IsVacuumHarvestCandidate(x, y, tileObj, growth, statusMap[x, y]))
                         continue;
 
                     long tileKey = PosKey(x, y);
@@ -5685,12 +5690,12 @@ namespace Autom8er
             }
         }
 
-        private static bool IsVacuumHarvestCandidate(TileObject tileObj, TileObjectGrowthStages growth, int stage)
+        private static bool IsVacuumHarvestCandidate(int xPos, int yPos, TileObject tileObj, TileObjectGrowthStages growth, int stage)
         {
             if (tileObj == null || growth == null)
                 return false;
 
-            bool isFarmCrop = growth.needsTilledSoil || growth.isAPlantSproutFromAFarmPlant(tileObj.tileObjectId);
+            bool isFarmCrop = IsFarmCropTile(xPos, yPos, tileObj, growth);
             bool canHarvest = isFarmCrop
                 ? growth.canBeHarvested(stage, deathCheck: true)
                 : growth.canBeHarvested(stage);
@@ -5709,6 +5714,26 @@ namespace Autom8er
             return isFarmCrop || isTreeFruitStyle;
         }
 
+        private static bool IsFarmCropTile(int xPos, int yPos, TileObject tileObj, TileObjectGrowthStages growth)
+        {
+            if (tileObj == null || growth == null || WorldManager.Instance == null)
+                return false;
+
+            if (growth.needsTilledSoil || growth.isAPlantSproutFromAFarmPlant(tileObj.tileObjectId))
+                return true;
+
+            if (xPos < 0 || yPos < 0 ||
+                xPos >= WorldManager.Instance.tileTypeMap.GetLength(0) ||
+                yPos >= WorldManager.Instance.tileTypeMap.GetLength(1))
+            {
+                return false;
+            }
+
+            int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
+            bool isFarmSoil = tileType == 7 || tileType == 8 || tileType == 12 || tileType == 13 || tileType == 43 || tileType == 44;
+            return isFarmSoil && growth.canBeHarvested(WorldManager.Instance.onTileStatusMap[xPos, yPos], deathCheck: true);
+        }
+
         private static bool IsClassicMachineHarvestTile(int tileObjectId)
         {
             return tileObjectId == 117 ||  // Crab Pot
@@ -5722,8 +5747,7 @@ namespace Autom8er
             if (target.tileObj == null || target.growth == null)
                 return;
 
-            bool isFarmCrop = target.growth.needsTilledSoil ||
-                              target.growth.isAPlantSproutFromAFarmPlant(target.tileObj.tileObjectId);
+            bool isFarmCrop = IsFarmCropTile(target.xPos, target.yPos, target.tileObj, target.growth);
 
             if (isFarmCrop)
             {
@@ -5983,6 +6007,11 @@ namespace Autom8er
             activeCrateUntil[PosKey(chest.xPos, chest.yPos)] = Time.time + FILTER_ACTIVE_WINDOW_SECONDS;
         }
 
+        public static bool IsPlayerInteracting(Chest chest)
+        {
+            return chest != null && chest.playingLookingInside > 0;
+        }
+
         public static void MarkRouteActive(int routeX, int routeY, HouseDetails inside)
         {
             if (!ConveyorHelper.IsFilterCrate(routeX, routeY, inside))
@@ -5999,6 +6028,9 @@ namespace Autom8er
         {
             if (chest == null)
                 return false;
+
+            if (IsPlayerInteracting(chest))
+                return true;
 
             float activeUntil;
             return activeCrateUntil.TryGetValue(PosKey(chest.xPos, chest.yPos), out activeUntil) && Time.time < activeUntil;
