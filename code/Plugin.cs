@@ -15,6 +15,10 @@ namespace Autom8er
         internal static ManualLogSource Log;
         private Harmony harmony;
         private float scanTimer = 0f;
+        private int nextVacuumCrateIndex = 0;
+        private int nextIdleVacuumCrateIndex = 0;
+        private int nextFilterCrateIndex = 0;
+        private int nextIdleFilterCrateIndex = 0;
 
         // Config
         private ConfigEntry<int> configConveyorTileItemId;
@@ -57,6 +61,15 @@ namespace Autom8er
         public static bool AnimationEnabled = true;
         public static float AnimationSpeed = 2f;
         public static bool StackableCritters = true;
+        private const float VACUUM_ACTIVE_SCAN_INTERVAL = 0.45f;
+        private const float VACUUM_IDLE_SCAN_INTERVAL = 10f;
+        private const float FILTER_ACTIVE_SCAN_INTERVAL = 0.45f;
+        private const float FILTER_IDLE_SCAN_INTERVAL = 8f;
+        private const int MAX_ACTIVE_FARMER_CRATES_PER_PASS = 6;
+        private const int MAX_ACTIVE_VACUUM_CRATES_PER_PASS = 4;
+        private const int MAX_IDLE_VACUUM_CRATES_PER_PASS = 1;
+        private const int MAX_ACTIVE_FILTER_CRATES_PER_PASS = 8;
+        private const int MAX_IDLE_FILTER_CRATES_PER_PASS = 2;
         private static bool loadCatchUpPending = false;
         private static bool loadCatchUpCompletedForCurrentLoad = false;
         private static float loadCatchUpNextAttemptAt = 0f;
@@ -331,6 +344,8 @@ namespace Autom8er
                 return;
 
             List<Chest> chests = new List<Chest>(activeChests);
+            List<Chest> vacuumCrates = new List<Chest>();
+            List<Chest> filterCrates = new List<Chest>();
 
             foreach (Chest chest in chests)
             {
@@ -345,7 +360,8 @@ namespace Autom8er
 
                 if (ConveyorHelper.IsFilterCrate(chest.xPos, chest.yPos, inside))
                 {
-                    FilterCrateHelper.TryPullFilteredItemsFromNetwork(chest, inside);
+                    if (inside == null)
+                        filterCrates.Add(chest);
                     continue;
                 }
 
@@ -355,9 +371,8 @@ namespace Autom8er
 
                 if (ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, inside))
                 {
-                    VacuumCrateHelper.TryVacuumNearbyDrops(chest, inside);
-                    VacuumCrateHelper.TryProcessFarmTile(chest, inside);
-                    VacuumCrateHelper.TryFlushStoredItemsToNetwork(chest, inside);
+                    if (inside == null)
+                        vacuumCrates.Add(chest);
                     continue;
                 }
 
@@ -385,6 +400,125 @@ namespace Autom8er
                 // Try to load feed into nearby silos (visual fill, one item per tick)
                 SiloHelper.TryLoadFeedIntoSilos(chest, inside);
             }
+
+            ProcessScheduledVacuumCrates(vacuumCrates);
+            ProcessScheduledFilterCrates(filterCrates);
+        }
+
+        private void ProcessScheduledVacuumCrates(List<Chest> vacuumCrates)
+        {
+            if (vacuumCrates == null || vacuumCrates.Count == 0)
+                return;
+
+            List<Chest> activeFarmerCrates = new List<Chest>();
+            List<Chest> activeVacuumCrates = new List<Chest>();
+            List<Chest> idleVacuumCrates = new List<Chest>();
+
+            for (int i = 0; i < vacuumCrates.Count; i++)
+            {
+                Chest chest = vacuumCrates[i];
+                if (VacuumCrateHelper.IsFarmerCrate(chest))
+                {
+                    if (VacuumCrateHelper.ShouldUseActiveScanRate(chest))
+                        activeFarmerCrates.Add(chest);
+                    continue;
+                }
+
+                if (VacuumCrateHelper.ShouldUseActiveScanRate(chest))
+                    activeVacuumCrates.Add(chest);
+                else
+                    idleVacuumCrates.Add(chest);
+            }
+
+            ProcessFarmerCrateBatch(activeFarmerCrates, ref nextVacuumCrateIndex, VACUUM_ACTIVE_SCAN_INTERVAL, MAX_ACTIVE_FARMER_CRATES_PER_PASS);
+            ProcessVacuumCrateBatch(activeVacuumCrates, ref nextVacuumCrateIndex, VACUUM_ACTIVE_SCAN_INTERVAL, MAX_ACTIVE_VACUUM_CRATES_PER_PASS);
+            ProcessVacuumCrateBatch(idleVacuumCrates, ref nextIdleVacuumCrateIndex, VACUUM_IDLE_SCAN_INTERVAL, MAX_IDLE_VACUUM_CRATES_PER_PASS);
+        }
+
+        private void ProcessFarmerCrateBatch(List<Chest> chests, ref int cursor, float targetInterval, int maxPerPass)
+        {
+            int budget = CalculateRoundRobinBudget(chests, targetInterval, maxPerPass);
+            for (int i = 0; i < budget; i++)
+            {
+                Chest chest = GetNextRoundRobinChest(chests, ref cursor);
+                if (chest == null)
+                    break;
+
+                VacuumCrateHelper.TryProcessFarmTile(chest, null);
+                VacuumCrateHelper.TryFlushStoredItemsToNetwork(chest, null);
+            }
+        }
+
+        private void ProcessVacuumCrateBatch(List<Chest> chests, ref int cursor, float targetInterval, int maxPerPass)
+        {
+            int budget = CalculateRoundRobinBudget(chests, targetInterval, maxPerPass);
+            for (int i = 0; i < budget; i++)
+            {
+                Chest chest = GetNextRoundRobinChest(chests, ref cursor);
+                if (chest == null)
+                    break;
+
+                VacuumCrateHelper.TryVacuumNearbyDrops(chest, null);
+                VacuumCrateHelper.TryProcessFarmTile(chest, null);
+                VacuumCrateHelper.TryFlushStoredItemsToNetwork(chest, null);
+            }
+        }
+
+        private void ProcessScheduledFilterCrates(List<Chest> filterCrates)
+        {
+            if (filterCrates == null || filterCrates.Count == 0)
+                return;
+
+            List<Chest> activeFilterCrates = new List<Chest>();
+            List<Chest> idleFilterCrates = new List<Chest>();
+
+            for (int i = 0; i < filterCrates.Count; i++)
+            {
+                Chest chest = filterCrates[i];
+                if (FilterCrateHelper.ShouldUseActiveScanRate(chest))
+                    activeFilterCrates.Add(chest);
+                else
+                    idleFilterCrates.Add(chest);
+            }
+
+            ProcessFilterCrateBatch(activeFilterCrates, ref nextFilterCrateIndex, FILTER_ACTIVE_SCAN_INTERVAL, MAX_ACTIVE_FILTER_CRATES_PER_PASS);
+            ProcessFilterCrateBatch(idleFilterCrates, ref nextIdleFilterCrateIndex, FILTER_IDLE_SCAN_INTERVAL, MAX_IDLE_FILTER_CRATES_PER_PASS);
+        }
+
+        private void ProcessFilterCrateBatch(List<Chest> chests, ref int cursor, float targetInterval, int maxPerPass)
+        {
+            int budget = CalculateRoundRobinBudget(chests, targetInterval, maxPerPass);
+            for (int i = 0; i < budget; i++)
+            {
+                Chest chest = GetNextRoundRobinChest(chests, ref cursor);
+                if (chest == null)
+                    break;
+
+                FilterCrateHelper.TryPullFilteredItemsFromNetwork(chest, null);
+            }
+        }
+
+        private int CalculateRoundRobinBudget(List<Chest> chests, float targetInterval, int maxPerPass)
+        {
+            if (chests == null || chests.Count == 0)
+                return 0;
+
+            float clampedTargetInterval = Mathf.Max(targetInterval, ScanInterval);
+            int budget = Mathf.CeilToInt((chests.Count * ScanInterval) / clampedTargetInterval);
+            return Mathf.Clamp(budget, 1, Mathf.Min(chests.Count, Mathf.Max(1, maxPerPass)));
+        }
+
+        private Chest GetNextRoundRobinChest(List<Chest> chests, ref int cursor)
+        {
+            if (chests == null || chests.Count == 0)
+                return null;
+
+            if (cursor < 0)
+                cursor = 0;
+
+            int index = cursor % chests.Count;
+            cursor = (index + 1) % chests.Count;
+            return chests[index];
         }
 
         private void OnDestroy()
@@ -1560,6 +1694,11 @@ namespace Autom8er
         private static Dictionary<long, int> quarryBreakCounts = new Dictionary<long, int>();
         private static int quarryRunGeneration = 0;
 
+        private static long PosKey(int x, int y)
+        {
+            return ((long)x << 32) | (uint)y;
+        }
+
         public static void ClearState()
         {
             activeCapture = null;
@@ -1983,11 +2122,6 @@ namespace Autom8er
                 quarryNodeIds.Add(tileObjectId);
         }
 
-        private static long PosKey(int x, int y)
-        {
-            return ((long)x << 32) | (uint)y;
-        }
-
         private static int FindStoneNodeByDrop(int dropItemId)
         {
             if (WorldManager.Instance == null || Inventory.Instance == null)
@@ -2029,6 +2163,8 @@ namespace Autom8er
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
         private static readonly Dictionary<string, int> filterDistributionCursor = new Dictionary<string, int>();
+        private static readonly Dictionary<long, float> automationChestRefreshAt = new Dictionary<long, float>();
+        private const float AUTOMATION_CHEST_REFRESH_INTERVAL = 2.5f;
 
         private sealed class DestinationSearchState
         {
@@ -2045,6 +2181,19 @@ namespace Autom8er
             public int slotIndex;
             public int routeX;
             public int routeY;
+        }
+
+        private static long GetAutomationAnchorKey(Chest chest)
+        {
+            if (chest == null)
+                return long.MinValue;
+
+            int insideX = chest.insideX + 1;
+            int insideY = chest.insideY + 1;
+            return (((long)chest.xPos & 0xFFFFFL) << 44)
+                | (((long)chest.yPos & 0xFFFFFL) << 24)
+                | (((long)insideX & 0xFFFL) << 12)
+                | ((long)insideY & 0xFFFL);
         }
 
         public static bool TryFeedAdjacentMachine(Chest sourceChest, HouseDetails inside)
@@ -2368,6 +2517,7 @@ namespace Autom8er
             if (!TryFindBestAdjacentOutputDestination(machineX, machineY, inside, itemId, out destination))
                 return false;
 
+            FilterCrateHelper.MarkRouteActive(destination.routeX, destination.routeY, inside);
             DepositIntoChest(destination.chest, destination.slotIndex, inside, itemId, stackAmount, onDepositSuccess);
             return true;
         }
@@ -2392,6 +2542,7 @@ namespace Autom8er
             OutputDestination filterDestination;
             if (TryChooseBalancedFilterDestination(state.filterDestinations, itemId, inside, advanceCursor: true, out filterDestination))
             {
+                FilterCrateHelper.MarkRouteActive(filterDestination.routeX, filterDestination.routeY, inside);
                 DepositIntoChest(filterDestination.chest, filterDestination.slotIndex, inside, itemId, stackAmount, onDepositSuccess);
                 return true;
             }
@@ -2409,6 +2560,7 @@ namespace Autom8er
             if (!TryFindBestConveyorOutputDestination(machineX, machineY, inside, itemId, out destination))
                 return false;
 
+            FilterCrateHelper.MarkRouteActive(destination.routeX, destination.routeY, inside);
             if (Plugin.AnimationEnabled)
             {
                 Vector2Int machinePos = new Vector2Int(machineX, machineY);
@@ -2519,6 +2671,7 @@ namespace Autom8er
             if (TryChooseBalancedFilterDestination(state.filterDestinations, itemId, inside, advanceCursor: true, out destination) ||
                 (destination = firstChestDestination) != null)
             {
+                FilterCrateHelper.MarkRouteActive(destination.routeX, destination.routeY, inside);
                 if (Plugin.AnimationEnabled)
                 {
                     Vector2Int machinePos = new Vector2Int(machineX, machineY);
@@ -3786,7 +3939,14 @@ namespace Autom8er
             if (anchorChest == null)
                 return;
 
+            long key = GetAutomationAnchorKey(anchorChest);
+            float now = Time.time;
+            float nextRefreshAt;
+            if (automationChestRefreshAt.TryGetValue(key, out nextRefreshAt) && now < nextRefreshAt)
+                return;
+
             EnsureNearbyChestsActive(anchorChest);
+            automationChestRefreshAt[key] = now + AUTOMATION_CHEST_REFRESH_INTERVAL;
         }
 
         public static void ActivateAllOutdoorAutomationChests()
@@ -4055,6 +4215,9 @@ namespace Autom8er
         private const float VACUUM_HARVEST_BATCH_DELAY = 0.2f;
         private const float VACUUM_STACK_BUFFER_SECONDS = 0.3f;
         private const int TRANSFER_STACK_CHUNK_SIZE = 10;
+        private const int BULK_TRANSFER_STACK_THRESHOLD = 1000;
+        private const int BULK_TRANSFER_CHUNK_SIZE = 100;
+        private const float VACUUM_ACTIVE_WINDOW_SECONDS = 2.5f;
 
         private class VacuumVisualState
         {
@@ -4112,12 +4275,38 @@ namespace Autom8er
         private static readonly Dictionary<long, float> pendingFlushStartedAt = new Dictionary<long, float>();
         private static readonly Dictionary<long, float> reservedFarmTiles = new Dictionary<long, float>();
         private static readonly List<PendingFarmAction> pendingFarmActions = new List<PendingFarmAction>();
+        private static readonly Dictionary<long, float> activeCrateUntil = new Dictionary<long, float>();
         private static bool dayChangeVacuumHarvestRunning = false;
         private static float farmerActionsBlockedUntil = 0f;
 
         private static long PosKey(int x, int y)
         {
             return ((long)x << 32) | (uint)y;
+        }
+
+        public static void MarkCrateActive(Chest chest)
+        {
+            if (chest == null)
+                return;
+
+            activeCrateUntil[PosKey(chest.xPos, chest.yPos)] = Time.time + VACUUM_ACTIVE_WINDOW_SECONDS;
+        }
+
+        public static bool IsFarmerCrate(Chest chest)
+        {
+            return chest != null && (HasHoeTool(chest) || HasShovelTool(chest));
+        }
+
+        public static bool ShouldUseActiveScanRate(Chest chest)
+        {
+            if (chest == null)
+                return false;
+
+            if (HasImmediateWork(chest))
+                return true;
+
+            float activeUntil;
+            return activeCrateUntil.TryGetValue(PosKey(chest.xPos, chest.yPos), out activeUntil) && Time.time < activeUntil;
         }
 
         public static System.Collections.IEnumerator ProcessDayChangeVacuumHarvests()
@@ -4370,11 +4559,12 @@ namespace Autom8er
                         AutomationCreditHelper.TryGrantDroppedItemPickupCredit(itemId, stackAmount, tallyType);
                     };
 
-                    ConveyorHelper.OutputDestination networkDestination;
-                    if (ConveyorHelper.TryFindBestOutputDestinationFromNetworkAnchor(chest, inside, itemId, includeAnchorChest: false, excludeVacuumCrates: true, out networkDestination))
-                    {
-                        Chest capturedSourceChest = chest;
-                        Chest capturedNetworkChest = networkDestination.chest;
+                ConveyorHelper.OutputDestination networkDestination;
+                if (ConveyorHelper.TryFindBestOutputDestinationFromNetworkAnchor(chest, inside, itemId, includeAnchorChest: false, excludeVacuumCrates: true, out networkDestination))
+                {
+                    FilterCrateHelper.MarkRouteActive(networkDestination.routeX, networkDestination.routeY, inside);
+                    Chest capturedSourceChest = chest;
+                    Chest capturedNetworkChest = networkDestination.chest;
                         int capturedRouteX = networkDestination.routeX;
                         int capturedRouteY = networkDestination.routeY;
                         System.Action depositToNetwork = () =>
@@ -4415,6 +4605,7 @@ namespace Autom8er
 
             if (collected > 0)
             {
+                MarkCrateActive(chest);
                 TriggerVacuumVisual(chest.xPos, chest.yPos, longestAnimation + 0.2f);
                 Plugin.Log.LogInfo("Autom8er: Vacuum crate at " + chest.xPos + "," + chest.yPos + " collected " + collected + " drop(s).");
             }
@@ -4445,7 +4636,8 @@ namespace Autom8er
                 if (!ConveyorHelper.TryFindBestOutputDestinationFromNetworkAnchor(chest, inside, itemId, includeAnchorChest: false, excludeVacuumCrates: true, out networkDestination))
                     continue;
 
-                int moveAmount = Mathf.Min(GetTransferChunkSize(itemId), stackAmount);
+                FilterCrateHelper.MarkRouteActive(networkDestination.routeX, networkDestination.routeY, inside);
+                int moveAmount = Mathf.Min(GetTransferChunkSize(itemId, stackAmount), stackAmount);
                 int sourceSlot = slot;
                 int capturedItemId = itemId;
                 int capturedMoveAmount = moveAmount;
@@ -4488,6 +4680,7 @@ namespace Autom8er
                     new Vector2Int(capturedRouteX, capturedRouteY),
                     inside, depositToNetwork);
 
+                MarkCrateActive(chest);
                 TriggerVacuumVisual(chest.xPos, chest.yPos, GetVacuumFlushDelay() + 0.2f);
                 return;
             }
@@ -4519,6 +4712,7 @@ namespace Autom8er
             if (hasFertilizer && TryFindBestFarmTile(chest, CanFertilizeTile, out FarmTileTarget fertilizeTarget))
             {
                 ApplyFertilizerAt(chest, fertilizerSlot, fertilizeTarget.xPos, fertilizeTarget.yPos);
+                MarkCrateActive(chest);
                 int seedItemId = GetFirstCropSeedItemId(chest);
                 if (seedItemId >= 0)
                     QueueFollowUpFarmActions(chest, fertilizeTarget.xPos, fertilizeTarget.yPos, queueFertilizer: false, seedItemId);
@@ -4535,6 +4729,7 @@ namespace Autom8er
                     continue;
 
                 PlantSeedAt(chest, slot, itemId, plantTarget.xPos, plantTarget.yPos);
+                MarkCrateActive(chest);
                 return true;
             }
 
@@ -4542,6 +4737,7 @@ namespace Autom8er
             if (shouldTill && HasHoeTool(chest) && TryFindBestFarmTile(chest, CanHoeTile, out FarmTileTarget hoeTarget))
             {
                 HoeTileAt(hoeTarget.xPos, hoeTarget.yPos);
+                MarkCrateActive(chest);
                 int seedItemId = GetFirstCropSeedItemId(chest);
                 QueueFollowUpFarmActions(chest, hoeTarget.xPos, hoeTarget.yPos, hasFertilizer, seedItemId);
                 return true;
@@ -4560,6 +4756,7 @@ namespace Autom8er
                     continue;
 
                 PlantTreeAt(chest, slot, itemId, treeTarget.xPos, treeTarget.yPos);
+                MarkCrateActive(chest);
                 return true;
             }
 
@@ -4686,6 +4883,7 @@ namespace Autom8er
             pendingFlushStartedAt.Clear();
             reservedFarmTiles.Clear();
             pendingFarmActions.Clear();
+            activeCrateUntil.Clear();
         }
 
         private static bool IsDropInSameSpace(DroppedItem drop, HouseDetails inside)
@@ -4781,6 +4979,51 @@ namespace Autom8er
 
             FarmTileTarget target;
             return TryFindBestTreePlantTile(chest, itemId, out target);
+        }
+
+        private static bool HasImmediateWork(Chest chest)
+        {
+            if (chest == null)
+                return false;
+
+            if (HasPendingFarmActionsForChest(chest))
+                return true;
+
+            bool hasShovelTool = HasShovelTool(chest);
+
+            for (int slot = 0; slot < chest.itemIds.Length; slot++)
+            {
+                int itemId = chest.itemIds[slot];
+                int stackAmount = chest.itemStacks[slot];
+                if (itemId < 0 || stackAmount <= 0)
+                    continue;
+
+                if (IsFertilizerItem(itemId) || IsCropSeedItem(itemId))
+                    return true;
+
+                if (hasShovelTool && IsTreePlantingItem(itemId) && ShouldRetainForAutoFarmer(chest, itemId))
+                    return true;
+
+                if (!ShouldRetainForAutoFarmer(chest, itemId))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool HasPendingFarmActionsForChest(Chest chest)
+        {
+            if (chest == null)
+                return false;
+
+            for (int i = 0; i < pendingFarmActions.Count; i++)
+            {
+                PendingFarmAction action = pendingFarmActions[i];
+                if (action.chestX == chest.xPos && action.chestY == chest.yPos)
+                    return true;
+            }
+
+            return false;
         }
 
         private static bool IsFertilizerItem(int itemId)
@@ -5370,9 +5613,12 @@ namespace Autom8er
             return (chestKey << 20) ^ (uint)itemId;
         }
 
-        private static int GetTransferChunkSize(int itemId)
+        private static int GetTransferChunkSize(int itemId, int stackAmount)
         {
-            return Inventory.Instance.allItems[itemId].checkIfStackable() ? TRANSFER_STACK_CHUNK_SIZE : 1;
+            if (!Inventory.Instance.allItems[itemId].checkIfStackable())
+                return 1;
+
+            return stackAmount >= BULK_TRANSFER_STACK_THRESHOLD ? BULK_TRANSFER_CHUNK_SIZE : TRANSFER_STACK_CHUNK_SIZE;
         }
 
         private static float GetVacuumFlushDelay()
@@ -5710,12 +5956,132 @@ namespace Autom8er
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
         private const int TRANSFER_STACK_CHUNK_SIZE = 10;
+        private const int BULK_TRANSFER_STACK_THRESHOLD = 1000;
+        private const int BULK_TRANSFER_CHUNK_SIZE = 100;
+        private const float FILTER_ACTIVE_WINDOW_SECONDS = 5f;
+        private static readonly Dictionary<long, float> activeCrateUntil = new Dictionary<long, float>();
+        private static readonly Dictionary<long, float> networkWakeSpreadCooldownUntil = new Dictionary<long, float>();
+        private const float NETWORK_WAKE_SPREAD_COOLDOWN_SECONDS = 1.5f;
 
         private class SourcePull
         {
             public Chest sourceChest;
             public int sourceSlot;
             public int moveAmount;
+        }
+
+        private static long PosKey(int x, int y)
+        {
+            return ((long)x << 32) | (uint)y;
+        }
+
+        public static void MarkCrateActive(Chest chest)
+        {
+            if (chest == null)
+                return;
+
+            activeCrateUntil[PosKey(chest.xPos, chest.yPos)] = Time.time + FILTER_ACTIVE_WINDOW_SECONDS;
+        }
+
+        public static void MarkRouteActive(int routeX, int routeY, HouseDetails inside)
+        {
+            if (!ConveyorHelper.IsFilterCrate(routeX, routeY, inside))
+                return;
+
+            Chest routeChest = ConveyorHelper.FindChestAt(routeX, routeY, inside);
+            if (routeChest == null)
+                return;
+
+            MarkNetworkActive(routeChest, inside);
+        }
+
+        public static bool ShouldUseActiveScanRate(Chest chest)
+        {
+            if (chest == null)
+                return false;
+
+            float activeUntil;
+            return activeCrateUntil.TryGetValue(PosKey(chest.xPos, chest.yPos), out activeUntil) && Time.time < activeUntil;
+        }
+
+        private static void MarkNetworkActive(Chest filterChest, HouseDetails inside)
+        {
+            if (filterChest == null)
+                return;
+
+            long rootKey = PosKey(filterChest.xPos, filterChest.yPos);
+            MarkCrateActive(filterChest);
+
+            float now = Time.time;
+            float cooldownUntil;
+            if (networkWakeSpreadCooldownUntil.TryGetValue(rootKey, out cooldownUntil) && now < cooldownUntil)
+                return;
+
+            networkWakeSpreadCooldownUntil[rootKey] = now + NETWORK_WAKE_SPREAD_COOLDOWN_SECONDS;
+
+            if (Plugin.ConveyorTileType == -1)
+                return;
+
+            HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
+            Queue<Vector2Int> toExplore = new Queue<Vector2Int>();
+            HashSet<long> seenFilters = new HashSet<long>();
+
+            for (int i = 0; i < 4; i++)
+            {
+                int checkX = filterChest.xPos + dx[i];
+                int checkY = filterChest.yPos + dy[i];
+                if (checkX < 0 || checkY < 0)
+                    continue;
+
+                if (!ConveyorHelper.IsConveyorTile(checkX, checkY, inside))
+                    continue;
+
+                Vector2Int pos = new Vector2Int(checkX, checkY);
+                if (pathNetwork.Add(pos))
+                    toExplore.Enqueue(pos);
+            }
+
+            while (toExplore.Count > 0)
+            {
+                Vector2Int current = toExplore.Dequeue();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int filterX = current.x + dx[i];
+                    int filterY = current.y + dy[i];
+                    if (filterX < 0 || filterY < 0)
+                        continue;
+
+                    if (!ConveyorHelper.IsFilterCrate(filterX, filterY, inside))
+                        continue;
+
+                    long filterKey = PosKey(filterX, filterY);
+                    if (!seenFilters.Add(filterKey))
+                        continue;
+
+                    Chest connectedFilterChest = ConveyorHelper.FindChestAt(filterX, filterY, inside);
+                    if (connectedFilterChest != null)
+                        MarkCrateActive(connectedFilterChest);
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nextX = current.x + dx[i];
+                    int nextY = current.y + dy[i];
+                    if (nextX < 0 || nextY < 0)
+                        continue;
+
+                    Vector2Int nextPos = new Vector2Int(nextX, nextY);
+                    if (pathNetwork.Contains(nextPos))
+                        continue;
+
+                    if (ConveyorHelper.IsConveyorTile(nextX, nextY, inside))
+                    {
+                        pathNetwork.Add(nextPos);
+                        toExplore.Enqueue(nextPos);
+                    }
+                }
+            }
         }
 
         public static void TryPullFilteredItemsFromNetwork(Chest filterChest, HouseDetails inside)
@@ -5751,6 +6117,7 @@ namespace Autom8er
                     if (HarvestHelper.TryDepositHarvestToChest(destination.chest, inside, itemId, extraAmount))
                     {
                         ContainerManager.manage.changeSlotInChest(filterChest.xPos, filterChest.yPos, slot, itemId, 1, inside);
+                        MarkNetworkActive(filterChest, inside);
                     }
                 }
 
@@ -5783,6 +6150,7 @@ namespace Autom8er
                     new Vector2Int(capturedRouteX, capturedRouteY),
                     inside, depositFiltered);
 
+                MarkNetworkActive(filterChest, inside);
                 ConveyorHelper.AdvanceFilterDistributionCursor(filterDestinations, itemId, inside);
                 return;
             }
@@ -5860,7 +6228,8 @@ namespace Autom8er
                         if (chest.itemIds[slot] != itemId || chest.itemStacks[slot] <= 0)
                             continue;
 
-                        int moveAmount = Mathf.Min(GetTransferChunkSize(itemId), GetTransferAmount(chest, slot, itemId));
+                        int transferableAmount = GetTransferAmount(chest, slot, itemId);
+                        int moveAmount = Mathf.Min(GetTransferChunkSize(itemId, transferableAmount), transferableAmount);
                         if (moveAmount <= 0)
                             continue;
 
@@ -5906,9 +6275,12 @@ namespace Autom8er
             return keepOne ? stack - 1 : stack;
         }
 
-        private static int GetTransferChunkSize(int itemId)
+        private static int GetTransferChunkSize(int itemId, int stackAmount)
         {
-            return Inventory.Instance.allItems[itemId].checkIfStackable() ? TRANSFER_STACK_CHUNK_SIZE : 1;
+            if (!Inventory.Instance.allItems[itemId].checkIfStackable())
+                return 1;
+
+            return stackAmount >= BULK_TRANSFER_STACK_THRESHOLD ? BULK_TRANSFER_CHUNK_SIZE : TRANSFER_STACK_CHUNK_SIZE;
         }
 
         private static void RemoveFromSourceChest(Chest sourceChest, int slot, int itemId, int moveAmount, HouseDetails inside)
@@ -7340,6 +7712,8 @@ namespace Autom8er
             ConveyorHelper.OutputDestination depositDestination;
             if (!ConveyorHelper.TryFindBestOutputDestinationFromNetworkAnchor(targetChest, null, outputId, includeAnchorChest: true, excludeVacuumCrates: false, out depositDestination))
                 return false;
+
+            FilterCrateHelper.MarkRouteActive(depositDestination.routeX, depositDestination.routeY, null);
 
             // Remove from pond slot 23 immediately
             int remaining = outputStack - extractAmount;
