@@ -13,6 +13,7 @@ namespace Autom8er
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
+        private const bool VerboseItemLogging = false;
         private Harmony harmony;
         private float scanTimer = 0f;
         private int nextVacuumCrateIndex = 0;
@@ -86,6 +87,12 @@ namespace Autom8er
 
             if (Log != null)
                 Log.LogInfo("Autom8er: Queued load catch-up.");
+        }
+
+        internal static void LogVerbose(string message)
+        {
+            if (VerboseItemLogging && Log != null)
+                Log.LogInfo(message);
         }
 
         private void Awake()
@@ -809,14 +816,14 @@ namespace Autom8er
 
             if (ConveyorHelper.TryDepositToAdjacentChestLegacy(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
             {
-                Plugin.Log.LogInfo("Autom8er: Machine output -> " + Inventory.Instance.allItems[resultItemId].itemName);
+                Plugin.LogVerbose("Autom8er: Machine output -> " + Inventory.Instance.allItems[resultItemId].itemName);
                 return false;
             }
 
             // Priority 2: Via Black Marble Path conveyor network
             if (ConveyorHelper.TryDepositViaConveyorPathLegacy(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
             {
-                Plugin.Log.LogInfo("Autom8er: Machine output via conveyor -> " + Inventory.Instance.allItems[resultItemId].itemName);
+                Plugin.LogVerbose("Autom8er: Machine output via conveyor -> " + Inventory.Instance.allItems[resultItemId].itemName);
                 return false;
             }
 
@@ -882,7 +889,7 @@ namespace Autom8er
                             new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
                             HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
 
-                        Plugin.Log.LogInfo("Autom8er: Crab pot harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
+                        Plugin.LogVerbose("Autom8er: Crab pot harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                     }
                 }
             }
@@ -923,7 +930,7 @@ namespace Autom8er
                                     new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
                                     HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
 
-                                Plugin.Log.LogInfo("Autom8er: Harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
+                                Plugin.LogVerbose("Autom8er: Harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                             }
                         }
                     }
@@ -965,7 +972,7 @@ namespace Autom8er
                                         new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
                                         HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
 
-                                    Plugin.Log.LogInfo("Autom8er: Harvest (loot) -> chest: " + Inventory.Instance.allItems[itemId].itemName);
+                                    Plugin.LogVerbose("Autom8er: Harvest (loot) -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                                 }
                             }
                         }
@@ -1650,7 +1657,7 @@ namespace Autom8er
                     NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, xPos, yPos);
                 }
 
-                Plugin.Log.LogInfo("Autom8er: Auto-harvested machine at " + xPos + "," + yPos);
+                Plugin.LogVerbose("Autom8er: Auto-harvested machine at " + xPos + "," + yPos);
                 return true;
             }
             finally
@@ -2301,7 +2308,7 @@ namespace Autom8er
                         }
                     }
 
-                    Plugin.Log.LogInfo("Autom8er: Chest -> Machine: " + (isFuelItem ? "1" : amountNeeded.ToString()) + "x " + item.itemName);
+                    Plugin.LogVerbose("Autom8er: Chest -> Machine: " + (isFuelItem ? "1" : amountNeeded.ToString()) + "x " + item.itemName);
                     return true;
                 }
             }
@@ -2507,7 +2514,7 @@ namespace Autom8er
                             AutomationCreditHelper.TryGrantMachineInputCredit(itemId, tileObjectId);
                         }
 
-                        Plugin.Log.LogInfo("Autom8er: Conveyor input -> Machine: " + (isFuelItem ? "1" : amountNeeded.ToString()) + "x " + item.itemName);
+                        Plugin.LogVerbose("Autom8er: Conveyor input -> Machine: " + (isFuelItem ? "1" : amountNeeded.ToString()) + "x " + item.itemName);
                         return true;
                     }
                 }
@@ -4216,8 +4223,10 @@ namespace Autom8er
         private const float POST_DAY_CHANGE_HARVEST_FARM_DELAY_SECONDS = 0.3f;
         private const float VACUUM_ITEM_DELAY = 0.03f;
         private const float VACUUM_VISUAL_HEIGHT = 1.6f;
-        private const int VACUUM_HARVEST_BATCH_SIZE = 5;
-        private const float VACUUM_HARVEST_BATCH_DELAY = 0.2f;
+        private const int DAY_CHANGE_HARVEST_CRATES_PER_WAVE = 4;
+        private const int DAY_CHANGE_HARVEST_TILES_PER_STEP = 2;
+        private const float DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS = 0.1f;
+        private const float DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS = 0.05f;
         private const float VACUUM_STACK_BUFFER_SECONDS = 0.3f;
         private const int TRANSFER_STACK_CHUNK_SIZE = 10;
         private const int BULK_TRANSFER_STACK_THRESHOLD = 1000;
@@ -4275,8 +4284,18 @@ namespace Autom8er
             public float executeAt;
         }
 
+        private class DayChangeHarvestWaveState
+        {
+            public Chest chest;
+            public List<HarvestTarget> harvestTargets = new List<HarvestTarget>();
+            public int nextHarvestIndex;
+            public float readyToFlushAt;
+            public bool flushStarted;
+        }
+
         private static readonly Dictionary<long, VacuumVisualState> activeVisuals = new Dictionary<long, VacuumVisualState>();
         private static readonly HashSet<uint> pendingDrops = new HashSet<uint>();
+        private static readonly HashSet<long> harvestCollectingCrates = new HashSet<long>();
         private static readonly Dictionary<long, float> pendingFlushStartedAt = new Dictionary<long, float>();
         private static readonly Dictionary<long, float> reservedFarmTiles = new Dictionary<long, float>();
         private static readonly List<PendingFarmAction> pendingFarmActions = new List<PendingFarmAction>();
@@ -4314,6 +4333,27 @@ namespace Autom8er
             return activeCrateUntil.TryGetValue(PosKey(chest.xPos, chest.yPos), out activeUntil) && Time.time < activeUntil;
         }
 
+        private static void BeginHarvestCollection(Chest chest)
+        {
+            if (chest == null)
+                return;
+
+            harvestCollectingCrates.Add(PosKey(chest.xPos, chest.yPos));
+        }
+
+        private static void EndHarvestCollection(Chest chest)
+        {
+            if (chest == null)
+                return;
+
+            harvestCollectingCrates.Remove(PosKey(chest.xPos, chest.yPos));
+        }
+
+        private static bool IsHarvestCollecting(Chest chest)
+        {
+            return chest != null && harvestCollectingCrates.Contains(PosKey(chest.xPos, chest.yPos));
+        }
+
         public static System.Collections.IEnumerator ProcessDayChangeVacuumHarvests()
         {
             if (WorldManager.Instance == null || ContainerManager.manage == null || !NetworkMapSharer.Instance.isServer)
@@ -4344,6 +4384,7 @@ namespace Autom8er
 
             int harvested = 0;
             HashSet<long> claimedHarvestTiles = new HashSet<long>();
+            List<Chest> outdoorVacuumCrates = new List<Chest>();
 
             for (int i = 0; i < chestsCopy.Count; i++)
             {
@@ -4354,25 +4395,84 @@ namespace Autom8er
                 if (!ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, null))
                     continue;
 
-                List<HarvestTarget> harvestTargets = CollectNearbyHarvestTargets(chest, null, claimedHarvestTiles);
-                for (int harvestIndex = 0; harvestIndex < harvestTargets.Count; harvestIndex++)
+                outdoorVacuumCrates.Add(chest);
+            }
+
+            for (int waveStart = 0; waveStart < outdoorVacuumCrates.Count; waveStart += DAY_CHANGE_HARVEST_CRATES_PER_WAVE)
+            {
+                int waveEnd = Mathf.Min(outdoorVacuumCrates.Count, waveStart + DAY_CHANGE_HARVEST_CRATES_PER_WAVE);
+                List<DayChangeHarvestWaveState> waveStates = new List<DayChangeHarvestWaveState>(waveEnd - waveStart);
+
+                for (int crateIndex = waveStart; crateIndex < waveEnd; crateIndex++)
                 {
-                    HarvestTarget target = harvestTargets[harvestIndex];
-                    HarvestVacuumTargetAt(chest, target);
-                    harvested++;
-
-                    bool batchComplete = ((harvestIndex + 1) % VACUUM_HARVEST_BATCH_SIZE == 0) || harvestIndex == harvestTargets.Count - 1;
-                    if (batchComplete)
+                    Chest chest = outdoorVacuumCrates[crateIndex];
+                    BeginHarvestCollection(chest);
+                    waveStates.Add(new DayChangeHarvestWaveState
                     {
-                        TryVacuumNearbyDrops(chest, null);
-                    }
-
-                    if ((harvestIndex + 1) % VACUUM_HARVEST_BATCH_SIZE == 0 && harvestIndex + 1 < harvestTargets.Count)
-                        yield return new WaitForSeconds(VACUUM_HARVEST_BATCH_DELAY);
+                        chest = chest,
+                        harvestTargets = CollectNearbyHarvestTargets(chest, null, claimedHarvestTiles),
+                        nextHarvestIndex = 0,
+                        readyToFlushAt = Time.time,
+                        flushStarted = false
+                    });
                 }
 
-                if (harvestTargets.Count == 0)
-                    TryVacuumNearbyDrops(chest, null);
+                while (true)
+                {
+                    bool hasPendingCrates = false;
+                    bool hasRemainingHarvest = false;
+                    float nextFlushDelay = float.MaxValue;
+
+                    for (int crateIndex = 0; crateIndex < waveStates.Count; crateIndex++)
+                    {
+                        DayChangeHarvestWaveState state = waveStates[crateIndex];
+                        if (state == null || state.flushStarted || state.chest == null)
+                            continue;
+
+                        hasPendingCrates = true;
+
+                        if (state.nextHarvestIndex < state.harvestTargets.Count)
+                        {
+                            hasRemainingHarvest = true;
+                            int processedThisStep = 0;
+
+                            while (processedThisStep < DAY_CHANGE_HARVEST_TILES_PER_STEP && state.nextHarvestIndex < state.harvestTargets.Count)
+                            {
+                                HarvestTarget target = state.harvestTargets[state.nextHarvestIndex++];
+                                HarvestVacuumTargetAt(state.chest, target);
+                                harvested++;
+                                processedThisStep++;
+                            }
+
+                            float gatherDelay = TryVacuumNearbyDrops(state.chest, null);
+                            float stepReadyAt = Time.time + Mathf.Max(gatherDelay, DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS);
+                            if (stepReadyAt > state.readyToFlushAt)
+                                state.readyToFlushAt = stepReadyAt;
+                        }
+                        else if (Time.time >= state.readyToFlushAt)
+                        {
+                            EndHarvestCollection(state.chest);
+                            TryFlushStoredItemsToNetwork(state.chest, null);
+                            state.flushStarted = true;
+                            continue;
+                        }
+
+                        if (!state.flushStarted && state.nextHarvestIndex >= state.harvestTargets.Count)
+                            nextFlushDelay = Mathf.Min(nextFlushDelay, Mathf.Max(0.01f, state.readyToFlushAt - Time.time));
+                    }
+
+                    if (!hasPendingCrates)
+                        break;
+
+                    float waitSeconds = hasRemainingHarvest
+                        ? DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS
+                        : (nextFlushDelay == float.MaxValue ? DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS : nextFlushDelay);
+
+                    yield return new WaitForSecondsRealtime(waitSeconds);
+                }
+
+                if (waveEnd < outdoorVacuumCrates.Count && DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS > 0f)
+                    yield return new WaitForSecondsRealtime(DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS);
             }
 
             if (harvested > 0)
@@ -4462,15 +4562,16 @@ namespace Autom8er
             return false;
         }
 
-        public static void TryVacuumNearbyDrops(Chest chest, HouseDetails inside)
+        public static float TryVacuumNearbyDrops(Chest chest, HouseDetails inside)
         {
             if (chest == null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, inside))
-                return;
+                return 0f;
 
             if (WorldManager.Instance == null || Inventory.Instance == null || WorldManager.Instance.itemsOnGround == null)
-                return;
+                return 0f;
 
             ConveyorHelper.EnsureAutomationChestsActive(chest);
+            bool collectToChestOnly = IsHarvestCollecting(chest);
 
             List<DroppedItem> candidates = new List<DroppedItem>();
             List<DroppedItem> itemsOnGround = WorldManager.Instance.itemsOnGround;
@@ -4502,7 +4603,7 @@ namespace Autom8er
 
             List<VacuumDropGroup> groups = BuildDropGroups(candidates);
             if (groups.Count == 0)
-                return;
+                return 0f;
 
             Vector3 chestWorld = GetVacuumTargetWorld(chest.xPos, chest.yPos);
             groups.Sort((a, b) =>
@@ -4564,12 +4665,21 @@ namespace Autom8er
                         AutomationCreditHelper.TryGrantDroppedItemPickupCredit(itemId, stackAmount, tallyType);
                     };
 
-                ConveyorHelper.OutputDestination networkDestination;
-                if (ConveyorHelper.TryFindBestOutputDestinationFromNetworkAnchor(chest, inside, itemId, includeAnchorChest: false, excludeVacuumCrates: true, out networkDestination))
-                {
-                    FilterCrateHelper.MarkRouteActive(networkDestination.routeX, networkDestination.routeY, inside);
-                    Chest capturedSourceChest = chest;
-                    Chest capturedNetworkChest = networkDestination.chest;
+                    if (HarvestHelper.TryDepositHarvestToChest(chest, inside, itemId, stackAmount, grantCredit))
+                        return;
+
+                    if (collectToChestOnly)
+                    {
+                        SpawnFallbackGroundDrop(itemId, stackAmount, tallyType, chestWorld, inside);
+                        return;
+                    }
+
+                    ConveyorHelper.OutputDestination networkDestination;
+                    if (ConveyorHelper.TryFindBestOutputDestinationFromNetworkAnchor(chest, inside, itemId, includeAnchorChest: false, excludeVacuumCrates: true, out networkDestination))
+                    {
+                        FilterCrateHelper.MarkRouteActive(networkDestination.routeX, networkDestination.routeY, inside);
+                        Chest capturedSourceChest = chest;
+                        Chest capturedNetworkChest = networkDestination.chest;
                         int capturedRouteX = networkDestination.routeX;
                         int capturedRouteY = networkDestination.routeY;
                         System.Action depositToNetwork = () =>
@@ -4593,9 +4703,6 @@ namespace Autom8er
                         return;
                     }
 
-                    if (HarvestHelper.TryDepositHarvestToChest(chest, inside, itemId, stackAmount, grantCredit))
-                        return;
-
                     if (ConveyorHelper.FallbackDepositToAnyChest(chest.xPos, chest.yPos, inside, itemId, stackAmount, grantCredit))
                         return;
 
@@ -4612,13 +4719,18 @@ namespace Autom8er
             {
                 MarkCrateActive(chest);
                 TriggerVacuumVisual(chest.xPos, chest.yPos, longestAnimation + 0.2f);
-                Plugin.Log.LogInfo("Autom8er: Vacuum crate at " + chest.xPos + "," + chest.yPos + " collected " + collected + " drop(s).");
+                Plugin.LogVerbose("Autom8er: Vacuum crate at " + chest.xPos + "," + chest.yPos + " collected " + collected + " drop(s).");
             }
+
+            return longestAnimation;
         }
 
         public static void TryFlushStoredItemsToNetwork(Chest chest, HouseDetails inside)
         {
             if (chest == null || inside != null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, inside))
+                return;
+
+            if (IsHarvestCollecting(chest))
                 return;
 
             ConveyorHelper.EnsureAutomationChestsActive(chest);
@@ -4818,20 +4930,40 @@ namespace Autom8er
                 }
             }
 
-            targets.Sort((a, b) =>
-            {
-                int distA = Mathf.Abs(a.xPos - chest.xPos) + Mathf.Abs(a.yPos - chest.yPos);
-                int distB = Mathf.Abs(b.xPos - chest.xPos) + Mathf.Abs(b.yPos - chest.yPos);
-                if (distA != distB)
-                    return distA.CompareTo(distB);
-
-                if (a.yPos != b.yPos)
-                    return a.yPos.CompareTo(b.yPos);
-
-                return a.xPos.CompareTo(b.xPos);
-            });
+            targets.Sort((a, b) => CompareHarvestTargets(chest, a, b));
 
             return targets;
+        }
+
+        private static int CompareHarvestTargets(Chest chest, HarvestTarget a, HarvestTarget b)
+        {
+            if (chest == null)
+                return 0;
+
+            int absDxA = Mathf.Abs(a.xPos - chest.xPos);
+            int absDyA = Mathf.Abs(a.yPos - chest.yPos);
+            int absDxB = Mathf.Abs(b.xPos - chest.xPos);
+            int absDyB = Mathf.Abs(b.yPos - chest.yPos);
+
+            int ringA = Mathf.Max(absDxA, absDyA);
+            int ringB = Mathf.Max(absDxB, absDyB);
+            if (ringA != ringB)
+                return ringA.CompareTo(ringB);
+
+            bool axisAlignedA = absDxA == 0 || absDyA == 0;
+            bool axisAlignedB = absDxB == 0 || absDyB == 0;
+            if (axisAlignedA != axisAlignedB)
+                return axisAlignedA ? -1 : 1;
+
+            int distA = absDxA + absDyA;
+            int distB = absDxB + absDyB;
+            if (distA != distB)
+                return distA.CompareTo(distB);
+
+            if (a.yPos != b.yPos)
+                return a.yPos.CompareTo(b.yPos);
+
+            return a.xPos.CompareTo(b.xPos);
         }
 
         public static void UpdateVisuals()
@@ -4885,6 +5017,7 @@ namespace Autom8er
 
             activeVisuals.Clear();
             pendingDrops.Clear();
+            harvestCollectingCrates.Clear();
             pendingFlushStartedAt.Clear();
             reservedFarmTiles.Clear();
             pendingFarmActions.Clear();
@@ -4926,6 +5059,9 @@ namespace Autom8er
 
             if (ConveyorHelper.FindSlotForItem(chest, itemId) != -1)
                 return true;
+
+            if (IsHarvestCollecting(chest))
+                return false;
 
             return ConveyorHelper.CanDepositFromPosition(chest.xPos, chest.yPos, inside, itemId);
         }
@@ -5477,6 +5613,7 @@ namespace Autom8er
         private static void BeginDayChangeHarvestPhase()
         {
             dayChangeVacuumHarvestRunning = true;
+            harvestCollectingCrates.Clear();
             pendingFarmActions.Clear();
             farmerActionsBlockedUntil = Mathf.Max(farmerActionsBlockedUntil, Time.time + POST_DAY_CHANGE_HARVEST_FARM_DELAY_SECONDS);
         }
@@ -5484,6 +5621,7 @@ namespace Autom8er
         private static void EndDayChangeHarvestPhase()
         {
             dayChangeVacuumHarvestRunning = false;
+            harvestCollectingCrates.Clear();
             pendingFarmActions.Clear();
             farmerActionsBlockedUntil = Mathf.Max(farmerActionsBlockedUntil, Time.time + POST_DAY_CHANGE_HARVEST_FARM_DELAY_SECONDS);
         }
@@ -6868,7 +7006,7 @@ namespace Autom8er
                     new Vector2Int(chest.xPos, chest.yPos),
                     new Vector2Int(crabPotX, crabPotY), null, depositBait);
 
-                Plugin.Log.LogInfo("Autom8er: Loaded bait into crab pot at " + crabPotX + "," + crabPotY + ": " + item.itemName);
+                Plugin.LogVerbose("Autom8er: Loaded bait into crab pot at " + crabPotX + "," + crabPotY + ": " + item.itemName);
                 return true;
             }
 
@@ -7077,7 +7215,7 @@ namespace Autom8er
                     new Vector2Int(chest.xPos, chest.yPos),
                     new Vector2Int(targetX, targetY), inside, depositItem);
 
-                Plugin.Log.LogInfo("Autom8er: Loaded " + item.itemName + " into growth stage object at " + targetX + "," + targetY);
+                Plugin.LogVerbose("Autom8er: Loaded " + item.itemName + " into growth stage object at " + targetX + "," + targetY);
                 return true;
             }
 
@@ -7543,7 +7681,7 @@ namespace Autom8er
                     new Vector2Int(pondX, pondY), null, depositFood);
 
                 string typeName = isFishPond ? "fish pond" : "bug terrarium";
-                Plugin.Log.LogInfo("Autom8er: Fed " + typeName + " at " + pondX + "," + pondY + ": " + Inventory.Instance.allItems[itemId].itemName);
+                Plugin.LogVerbose("Autom8er: Fed " + typeName + " at " + pondX + "," + pondY + ": " + Inventory.Instance.allItems[itemId].itemName);
                 return true;
             }
 
@@ -7782,7 +7920,7 @@ namespace Autom8er
 
             string typeName = isFishPond ? "fish pond" : "bug terrarium";
             string itemName = Inventory.Instance.allItems[outputId].itemName;
-            Plugin.Log.LogInfo("Autom8er: Extracted " + extractAmount + "x " + itemName + " from " + typeName + " at " + rootX + "," + rootY);
+            Plugin.LogVerbose("Autom8er: Extracted " + extractAmount + "x " + itemName + " from " + typeName + " at " + rootX + "," + rootY);
             return true;
         }
     }

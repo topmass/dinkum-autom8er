@@ -277,6 +277,9 @@ Autom8er namespace
 ├── VacuumCrateHelper (static class)
 │   ├── Green crates only
 │   ├── ProcessDayChangeVacuumHarvests() - Day-change crop/tree harvest wave runner
+│   │   - Outdoor green crates are sorted by map position and processed in 4-crate waves
+│   │   - Each active crate harvests 2 claimed tiles per step, does a local vacuum pass, then waits 0.1s realtime before the next step
+│   │   - A crate does not unlock network flushing until its own harvest and local gather pass have finished
 │   ├── TryVacuumNearbyDrops() - Suck nearby drops into the crate, then route them onward
 │   ├── TryProcessFarmTile() - Till/fertilize/plant nearby farm tiles during normal scan passes
 │   ├── TryFlushStoredItemsToNetwork() - Push one grouped chunk back out of the green crate per scan pass
@@ -519,11 +522,15 @@ Same architecture as fish ponds but:
 
 ### Vacuum Crates
 - `Green Wooden Crate` keeps a `21 x 21` harvest area and a `25 x 25` pickup area
-- Day-change harvests break in waves of 5 tiles with a 0.2s delay between waves
+- Day-change harvests now run in 4-crate waves instead of one giant full-farm sweep
+- Within an active wave, each crate breaks 2 tiles per step, vacuums locally, then waits 0.1s realtime before continuing
+- A green crate keeps harvested items locally until that specific crate has finished its full day-change harvest pass, then it starts dumping grouped chunks into the network
 - Multi-yield crop/tree drops are grouped so only one conveyor visual is shown per harvested tile/item group
 - Vacuumed items route through the connected network using the same destination priority as other outputs, so filter crates can sort vacuum harvests too
 - Vacuum crate exports now use the scan loop as pacing: one grouped chunk per scan pass, with a small short-stack buffer before flushing
-- This keeps mixed-item orchard or farm harvests from flooding the belt with same-frame bursts
+- Harvest targets are ordered in outward square rings from the green crate so nearby axis tiles are broken before diagonal-looking outer tiles
+- High-frequency per-item vacuum and transfer logs are disabled by default to avoid BepInEx console spam during large harvests
+- This keeps mixed-item orchard or farm harvests from flooding the belt with same-frame bursts while still scaling better on large fields
 
 ### Stackable Critters (v1.5.0)
 On first `Update()` tick, `ApplyStackableCritters()` iterates all `Inventory.Instance.allItems` and sets `isStackable = true` on any item with `underwaterCreature` set. This directly modifies the item data — no Harmony patch needed. Works everywhere including the 2 places in `Inventory.cs` that check the `isStackable` field directly (UI stacking logic). Config `StackableCritters = false` skips the modification entirely (vanilla behavior). Fish pond feeding is unaffected — our code already takes exactly 1 critter per feeding cycle regardless of stack size.
@@ -779,7 +786,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
-- **Current `main` (unversioned after 1.6.1)** - Green Auto Farmer crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated Auto Farmer day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green Auto Farmer crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Vacuum and filter exports now emit grouped chunks per scan pass instead of local burst scheduling. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not Auto Farmer-owned, and now process in 100-machine / 0.2s waves to smooth heavy honey days. Day-change systems use kickoff delays only, not full completion waits.
+- **Current `main` (unversioned after 1.6.1)** - Green Auto Farmer crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated Auto Farmer day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green Auto Farmer crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Vacuum and filter exports now emit grouped chunks per scan pass instead of local burst scheduling. Auto Farmer day-change harvesting is now wave-based for large fields: 4 crates work at once, each crate breaks 2 tiles per step with a 0.1s realtime pause, keeps its gathered items locally until that crate finishes, then starts dumping to the network. Harvest target ordering expands outward from the crate in square rings so the break pattern looks cleaner around the green crate. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not Auto Farmer-owned, and now process in 100-machine / 0.2s waves to smooth heavy honey days. Day-change systems use kickoff delays only, not full completion waits.
 - **1.6.1** - Fixed load-in catch-up processing so existing day-change outputs now run after loading into a save once the world, player, and chests are ready. Added fixed 1 second phasing between day-change harvest systems, quarry mining credit, and a subtle conveyor animation polish so items travel 30% into the destination tile before vanishing.
 - **1.5.2** - Large single-chest day-change arrays now scan through the full connected harvest network with no arbitrary connected-array/path scan cutoffs. Day-change conveyor launches are staggered in 100-item / 0.2s batches per destination chest so 1000+ machine arrays stay visual while reducing the launch spike.
 - **1.5.1** - Fixed player credit across all automation paths. Automated machine outputs now properly count for player progression when deposited into storage. Bee houses, key cutters, worm farms, crab pots, fish ponds, and bug terrariums also grant proper automation credit. Improved stability for large machine arrays.
