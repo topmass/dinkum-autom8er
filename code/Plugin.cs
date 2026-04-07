@@ -65,6 +65,7 @@ namespace Autom8er
         internal const int ACTIVE_FARMER_CRATES_PER_STEP = 4;
         internal const int FARMER_ACTIONS_PER_STEP = 2;
         internal const float FARMER_STEP_DELAY_SECONDS = 0.1f;
+        internal const float DAY_CHANGE_FINAL_COLLECTION_SETTLE_SECONDS = 0.12f;
         private const float VACUUM_ACTIVE_SCAN_INTERVAL = 0.45f;
         private const float VACUUM_IDLE_SCAN_INTERVAL = 10f;
         private const float FILTER_ACTIVE_SCAN_INTERVAL = 0.45f;
@@ -79,6 +80,7 @@ namespace Autom8er
         private static bool loadCatchUpCompletedForCurrentLoad = false;
         private static float loadCatchUpNextAttemptAt = 0f;
         private static int loadCatchUpAttempts = 0;
+        private static readonly Dictionary<string, float> throttledLogUntilByKey = new Dictionary<string, float>();
         private bool crittersPatched = false;
 
         public static void QueueLoadCatchUp()
@@ -96,6 +98,19 @@ namespace Autom8er
         {
             if (VerboseItemLogging && Log != null)
                 Log.LogInfo(message);
+        }
+
+        internal static void LogWarningThrottled(string key, string message, float throttleSeconds = 5f)
+        {
+            if (Log == null || string.IsNullOrEmpty(key))
+                return;
+
+            float now = Time.realtimeSinceStartup;
+            if (throttledLogUntilByKey.TryGetValue(key, out float nextAllowedAt) && now < nextAllowedAt)
+                return;
+
+            throttledLogUntilByKey[key] = now + Mathf.Max(0.1f, throttleSeconds);
+            Log.LogWarning(message);
         }
 
         private void Awake()
@@ -2519,7 +2534,7 @@ namespace Autom8er
                                 }
                                 else if (!FallbackDepositToAnyChest(capturedMachineX, capturedMachineY, capturedInside, capturedItemId, amountNeeded))
                                 {
-                                    Plugin.Log.LogWarning("Autom8er: Machine occupied on arrival — no chest available, item lost!");
+                    Plugin.LogWarningThrottled("machine-occupied-item-lost", "Autom8er: Machine occupied on arrival, no chest available, item lost.");
                                 }
                                 ConveyorAnimator.UnreserveTarget(capturedMachineX, capturedMachineY);
                             };
@@ -2618,7 +2633,7 @@ namespace Autom8er
                     if (arrivalSlot == -1)
                     {
                         if (!FallbackDepositToAnyChest(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess))
-                            Plugin.Log.LogWarning("Autom8er: Target chest full on arrival — no chest available, item lost!");
+                            Plugin.LogWarningThrottled("target-full-item-lost", "Autom8er: Target chest full on arrival, no chest available, item lost.");
                         return;
                     }
 
@@ -2729,7 +2744,7 @@ namespace Autom8er
                         if (arrivalSlot == -1)
                         {
                             if (!FallbackDepositToAnyChestLegacy(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess))
-                                Plugin.Log.LogWarning("Autom8er: Target chest full on arrival — no chest available, item lost!");
+                                Plugin.LogWarningThrottled("target-full-item-lost", "Autom8er: Target chest full on arrival, no chest available, item lost.");
                             return;
                         }
 
@@ -4327,6 +4342,7 @@ namespace Autom8er
             public int nextHarvestIndex;
             public float readyToFlushAt;
             public bool flushStarted;
+            public bool pendingFinalCollectionSweep;
         }
 
         private static readonly Dictionary<long, VacuumVisualState> activeVisuals = new Dictionary<long, VacuumVisualState>();
@@ -4485,9 +4501,33 @@ namespace Autom8er
                             float stepReadyAt = Time.time + Mathf.Max(gatherDelay, DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS);
                             if (stepReadyAt > state.readyToFlushAt)
                                 state.readyToFlushAt = stepReadyAt;
+
+                            if (state.nextHarvestIndex >= state.harvestTargets.Count)
+                            {
+                                state.pendingFinalCollectionSweep = true;
+                                state.readyToFlushAt = Mathf.Max(state.readyToFlushAt, Time.time + Plugin.DAY_CHANGE_FINAL_COLLECTION_SETTLE_SECONDS);
+                            }
                         }
                         else if (Time.time >= state.readyToFlushAt)
                         {
+                            if (state.pendingFinalCollectionSweep)
+                            {
+                                state.pendingFinalCollectionSweep = false;
+                                float finalGatherDelay = TryVacuumNearbyDrops(state.chest, null);
+                                if (finalGatherDelay > 0f)
+                                {
+                                    state.readyToFlushAt = Time.time + Mathf.Max(finalGatherDelay, Plugin.DAY_CHANGE_FINAL_COLLECTION_SETTLE_SECONDS);
+                                    continue;
+                                }
+                            }
+
+                            float trailingGatherDelay = TryVacuumNearbyDrops(state.chest, null);
+                            if (trailingGatherDelay > 0f)
+                            {
+                                state.readyToFlushAt = Time.time + Mathf.Max(trailingGatherDelay, Plugin.DAY_CHANGE_FINAL_COLLECTION_SETTLE_SECONDS);
+                                continue;
+                            }
+
                             EndHarvestCollection(state.chest);
                             TryFlushStoredItemsToNetwork(state.chest, null);
                             state.flushStarted = true;
@@ -6125,7 +6165,7 @@ namespace Autom8er
             }
             catch (System.Exception e)
             {
-                Plugin.Log.LogWarning("Autom8er: Failed to remove drop for vacuum crate: " + e.Message);
+                Plugin.LogWarningThrottled("vacuum-remove-drop-failed", "Autom8er: Failed to remove drop for vacuum crate: " + e.Message, 10f);
                 return false;
             }
         }
@@ -6242,7 +6282,7 @@ namespace Autom8er
             }
             catch (System.Exception e)
             {
-                Plugin.Log.LogWarning("Autom8er: Failed to create Har-Vac visual: " + e.Message);
+                Plugin.LogWarningThrottled("har-vac-visual-create-failed", "Autom8er: Failed to create Har-Vac visual: " + e.Message, 10f);
                 return null;
             }
         }
@@ -6994,7 +7034,7 @@ namespace Autom8er
                     if (anim.onArrival != null)
                     {
                         try { anim.onArrival(); }
-                        catch (System.Exception e) { Plugin.Log.LogWarning("Autom8er: Animation callback error: " + e.Message); }
+                        catch (System.Exception e) { Plugin.LogWarningThrottled("animation-callback-error", "Autom8er: Animation callback error: " + e.Message, 10f); }
                     }
                     activeAnimations.RemoveAt(i);
                     continue;
@@ -7028,7 +7068,7 @@ namespace Autom8er
                     if (anim.onArrival != null)
                     {
                         try { anim.onArrival(); }
-                        catch (System.Exception e) { Plugin.Log.LogWarning("Autom8er: Animation callback error: " + e.Message); }
+                        catch (System.Exception e) { Plugin.LogWarningThrottled("animation-callback-error", "Autom8er: Animation callback error: " + e.Message, 10f); }
                     }
                     GameObject.Destroy(anim.visual);
                     activeAnimations.RemoveAt(i);
@@ -7052,7 +7092,7 @@ namespace Autom8er
                     if (anim.onArrival != null)
                     {
                         try { anim.onArrival(); }
-                        catch (System.Exception e) { Plugin.Log.LogWarning("Autom8er: Arc animation callback error: " + e.Message); }
+                        catch (System.Exception e) { Plugin.LogWarningThrottled("arc-animation-callback-error", "Autom8er: Arc animation callback error: " + e.Message, 10f); }
                     }
                     activeArcAnimations.RemoveAt(i);
                     continue;
@@ -7081,7 +7121,7 @@ namespace Autom8er
                     if (anim.onArrival != null)
                     {
                         try { anim.onArrival(); }
-                        catch (System.Exception e) { Plugin.Log.LogWarning("Autom8er: Arc animation callback error: " + e.Message); }
+                        catch (System.Exception e) { Plugin.LogWarningThrottled("arc-animation-callback-error", "Autom8er: Arc animation callback error: " + e.Message, 10f); }
                     }
                     GameObject.Destroy(anim.visual);
                     activeArcAnimations.RemoveAt(i);
@@ -7097,7 +7137,7 @@ namespace Autom8er
                 if (anim.onArrival != null)
                 {
                     try { anim.onArrival(); }
-                    catch (System.Exception e) { Plugin.Log.LogWarning("Autom8er: ClearAll callback error: " + e.Message); }
+                    catch (System.Exception e) { Plugin.LogWarningThrottled("clearall-callback-error", "Autom8er: ClearAll callback error: " + e.Message, 10f); }
                 }
                 if (anim.visual != null)
                     GameObject.Destroy(anim.visual);
@@ -7110,7 +7150,7 @@ namespace Autom8er
                 if (anim.onArrival != null)
                 {
                     try { anim.onArrival(); }
-                    catch (System.Exception e) { Plugin.Log.LogWarning("Autom8er: ClearAll arc callback error: " + e.Message); }
+                    catch (System.Exception e) { Plugin.LogWarningThrottled("clearall-arc-callback-error", "Autom8er: ClearAll arc callback error: " + e.Message, 10f); }
                 }
                 if (anim.visual != null)
                     GameObject.Destroy(anim.visual);
@@ -7182,7 +7222,7 @@ namespace Autom8er
             }
             catch (System.Exception e)
             {
-                Plugin.Log.LogWarning("Autom8er: Failed to create animation visual for item " + itemId + ": " + e.Message);
+                Plugin.LogWarningThrottled("animation-visual-create-failed-" + itemId, "Autom8er: Failed to create animation visual for item " + itemId + ": " + e.Message, 10f);
             }
 
             return visual;

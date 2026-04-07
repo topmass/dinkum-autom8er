@@ -26,6 +26,13 @@
 15. **Quarry Auto-Harvest** - Vanilla quarry day-change nodes can be auto-harvested into Autom8er chest/conveyor networks
 16. **Green Crates = VacuFarm Crates** - Green crates harvest/vacuum nearby farm outputs, can till/fertilize/plant, and pass outputs into the connected network
 17. **Black Crates = Filter Crates** - Black crates hold sample items and route matching network items into a touching storage chest or green VacuFarm crate
+18. **Unlimited Shop Stall Rebuy** - Real shop stall stock stays buyable after purchase instead of marking sold out for the day
+
+### Large Array Defaults
+- Shared Auto Farmer pacing defaults: `4` active farmer crates per step, `2` farm actions or harvest tiles per active crate, `0.1s` realtime pause between day-change harvest steps
+- Daytime green-crate scheduler: active farmer crates target `0.45s`, plain green vacuum crates target `0.45s` when active and `10s` when idle
+- Daytime black-crate scheduler: interacting crates run at normal scan cadence, active crates target `0.45s`, idle crates target `8s`
+- Large manual chest dumps into filter networks can temporarily switch from simple round-robin to quota-style equalization, but live drip-fed machine traffic stays on normal round-robin
 
 ### Green Crate Tree Mode
 - If a green crate contains a shovel and buried tree/fruit items, tree planting uses a dedicated layout pass that is separate from crop tilling/fertilizing/seed planting.
@@ -92,7 +99,7 @@ if (onTileMap[x, y] < -1)
 
 ## Code Structure
 
-### Plugin.cs Layout (~3400 lines)
+### Plugin.cs Layout (~8300 lines)
 ```
 Autom8er namespace
 ├── Plugin : BaseUnityPlugin
@@ -100,21 +107,36 @@ Autom8er namespace
 │   │          AutoFeedPonds, HoldOutputForBreeding, AnimationEnabled, AnimationSpeed,
 │   │          StackableCritters
 │   ├── Constants: WHITE_CRATE_TILE_ID (417), WHITE_CHEST_TILE_ID (430),
-│   │          BLACK_CRATE_TILE_ID (410), GREEN_CRATE_TILE_ID (412)
+│   │          BLACK_CRATE_TILE_ID (410), GREEN_CRATE_TILE_ID (412),
+│   │          BLAST_FURNACE_TILE_ID (581), shared farmer pacing defaults,
+│   │          active/idle scheduler intervals and per-pass caps
 │   ├── Awake() - Init config, apply Harmony patches
 │   ├── Update() - ConveyorAnimator.UpdateAnimations() + scan timer + ProcessAllChests
 │   ├── OnDestroy() - ConveyorAnimator.ClearAllAnimations() + harmony.UnpatchSelf()
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
 │   ├── ApplyStackableCritters() - One-time: sets isStackable=true on all underwaterCreature items
-│   └── ProcessAllChests() - Main loop (ORDER MATTERS):
-│       1. FilterCrateHelper.TryPullFilteredItemsFromNetwork for black crates
-│       2. VacuumCrateHelper.TryVacuumNearbyDrops / TryFlushStoredItemsToNetwork / TryProcessFarmTile for green crates
-│       3. FishPondHelper.TryFeedPondsAndTerrariums ← MUST BE FIRST among chest-fed systems (see Rule 7)
-│       4. TryFeedAdjacentMachine (furnaces, etc)
-│       5. TryFeedMachineViaConveyorPath (furnaces via conveyor)
-│       6. CrabPotHelper.TryLoadBaitIntoCrabPots (2-tile radius)
-│       7. GrowthStageHelper.TryLoadItemsIntoGrowthStages (incubators, etc)
-│       8. SiloHelper.TryLoadFeedIntoSilos (staggered bag animations)
+│   ├── ProcessAllChests() - Main loop
+│   │   ├── Separates black crates, green crates, and standard chests first
+│   │   ├── ProcessScheduledVacuumCrates() - Round-robin green-crate scheduler
+│   │   ├── ProcessScheduledFilterCrates() - Round-robin black-crate scheduler
+│   │   └── Standard chest pass order:
+│   │       1. FishPondHelper.TryFeedPondsAndTerrariums ← MUST BE FIRST among chest-fed systems (see Rule 7)
+│   │       2. TryFeedAdjacentMachine (furnaces, etc)
+│   │       3. TryFeedMachineViaConveyorPath (furnaces via conveyor)
+│   │       4. CrabPotHelper.TryLoadBaitIntoCrabPots (2-tile radius)
+│   │       5. GrowthStageHelper.TryLoadItemsIntoGrowthStages (incubators, etc)
+│   │       6. SiloHelper.TryLoadFeedIntoSilos (staggered bag animations)
+│   ├── ProcessFarmerCrateBatch() - Daytime till/fertilize/plant + flush for active farmer crates
+│   ├── ProcessVacuumCrateBatch() - Daytime loose-drop vacuum + farm action + flush for plain green crates
+│   └── ProcessFilterCrateBatch() - Daytime active/idle filter pulls
+│
+├── ShopManagerUnlimitedStockPatch [HarmonyPatch]
+│   └── Prefix on ShopManager.sellStall()
+│       - Prevents real shop stalls from marking sold out after purchase
+│
+├── ShopBuyDropUnlimitedStockPatch [HarmonyPatch]
+│   └── Prefix on ShopBuyDrop.sold(bool)
+│       - Skips sold-out behavior for real shop stalls so tools/seeds stay rebuyable
 │
 ├── QuarryServerDropCapturePatch / QuarryDirectedServerDropCapturePatch [HarmonyPatch]
 │   └── Prefix on both NetworkMapSharer.spawnAServerDrop overloads
@@ -155,6 +177,7 @@ Autom8er namespace
 │       - Clears pendingSorts (stale coroutine refs from previous session)
 │       - Clears all animations
 │       - Clears filter distribution cursors
+│       - Clears temporary filter equalization plans
 │       - Clears quarry runtime state
 │
 ├── QuarryHelper (static class)
@@ -276,6 +299,8 @@ Autom8er namespace
 │
 ├── VacuumCrateHelper (static class)
 │   ├── Green crates only
+│   ├── IsFarmerCrate() - Green crate with a hoe or shovel inside
+│   ├── ShouldUseActiveScanRate() - Immediate-work check plus active window cache
 │   ├── ProcessDayChangeVacuumHarvests() - Day-change crop/tree harvest wave runner
 │   │   - Outdoor green crates are sorted by map position and processed in 4-crate waves
 │   │   - Each active crate harvests 2 claimed tiles per step, does a local vacuum pass, then waits 0.1s realtime before the next step
@@ -283,12 +308,18 @@ Autom8er namespace
 │   ├── TryVacuumNearbyDrops() - Suck nearby drops into the crate, then route them onward
 │   ├── TryProcessFarmTile() - Till/fertilize/plant nearby farm tiles during normal scan passes
 │   ├── TryFlushStoredItemsToNetwork() - Push one grouped chunk back out of the green crate per scan pass
+│   ├── GetTransferChunkSize() - Green-crate export chunk rules
+│   ├── ShouldUseMultiFarmerChunking() - Enables larger export chunking on 2+ connected green-crate networks
 │   └── Uses routed output destinations, so filtered black-crate routes outrank generic storage, but generic network destinations must not treat green crates as normal storage
 │
 ├── FilterCrateHelper (static class)
 │   ├── Black crates only
+│   ├── IsPlayerInteracting() - True while a player is looking inside the black crate
+│   ├── MarkRouteActive() - Wake a black-crate network from a route that targets it
+│   ├── ShouldUseActiveScanRate() - Player interaction or recent network activity
 │   ├── TryPullFilteredItemsFromNetwork() - Keeps one sample item, pulls one grouped chunk from connected source chests per scan pass
 │   ├── FindSourcePull() - BFS the connected conveyor network for a valid source chest
+│   ├── GetPreferredMoveAmount() - Normal chunking or temporary equalization quota
 │   ├── Bulk dump equalization - Large stackable manual stock dumps from normal source chests can create a temporary per-source quota plan so same-item filters start closer to equal shares before returning to normal round-robin
 │   ├── Uses the black crate tile as the conveyor arrival point
 │   └── Deposits into the regular chest touching the black crate, using the shared filter splitter
@@ -517,6 +548,8 @@ Same architecture as fish ponds but:
 - If multiple black crates on the same connected network filter the same item, Autom8er round-robins across them instead of always picking the first one found
 - That splitter applies both to normal routed outputs and to the black crate's own active pull behavior, so trickle inputs and large dumps both distribute across the same filter group
 - Filter pulls now use the same cadence model as the rest of Autom8er belts: one grouped chunk per scan pass instead of burst-scheduling a whole source stack
+- Player interaction is an explicit wake signal. A black crate a player is currently looking inside must stay awake and keep servicing pulls immediately.
+- Filter networks are also route-woken. If a routed item targets a black crate, connected black crates on that network are marked active instead of waiting for slow idle polling.
 - Large stackable manual stock dumps from normal storage chests can temporarily switch to a stricter equalization plan so matching filters receive a closer startup share before returning to normal round-robin
 - Live drip-fed traffic from machines and other changing sources still uses the simpler round-robin pull behavior
 - The black crate never pulls back out of its own touching destination chest
@@ -524,6 +557,9 @@ Same architecture as fish ponds but:
 
 ### Vacuum Crates
 - `Green Wooden Crate` keeps a `21 x 21` harvest area and a `25 x 25` pickup area
+- Green crates split into two daytime roles:
+  - tool-equipped farmer crates use the farmer scheduler and do farm work, not generic loose-drop vacuum sweeps
+  - plain green crates remain loose-drop vacuum collectors, but use a much slower idle cadence
 - Day-change harvests now run in 4-crate waves instead of one giant full-farm sweep
 - Within an active wave, each crate breaks 2 tiles per step, vacuums locally, then waits 0.1s realtime before continuing
 - A green crate keeps harvested items locally until that specific crate has finished its full day-change harvest pass, then it starts dumping grouped chunks into the network
@@ -657,7 +693,7 @@ From `Dinkum_Data/Managed/`:
 
 ### Build Command
 ```bash
-cd /home/topmass/Code/dinkum-mods/Autom8er && dotnet build code/Autom8er.csproj -c Release
+cd /home/matthew/Code/dinkum-mods/Autom8er && dotnet build code/Autom8er.csproj -c Release
 ```
 
 ### Output
@@ -671,7 +707,7 @@ code/bin/Release/net472/topmass.autom8er.dll
 cp code/bin/Release/net472/topmass.autom8er.dll mod/
 
 # Game plugins
-cp code/bin/Release/net472/topmass.autom8er.dll /home/topmass/Steam/steamapps/common/Dinkum/BepInEx/plugins/
+cp code/bin/Release/net472/topmass.autom8er.dll /home/matthew/.local/share/Steam/steamapps/common/Dinkum/BepInEx/plugins/
 ```
 
 ---
@@ -789,7 +825,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
-- **Current `main` (unversioned after 1.6.1)** - Green Auto Farmer crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated Auto Farmer day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green Auto Farmer crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Large manual stack dumps from normal chests can temporarily use a stricter equalization plan across matching filters before falling back to round-robin. Auto Farmer day-change harvesting is now wave-based for large fields: 4 crates work at once, each crate breaks 2 tiles per step with a 0.1s realtime pause, keeps its gathered items locally until that crate finishes, then starts dumping to the network. Green-crate exports on multi-green-crate networks now use larger `100`-item chunks for stackable harvest output once the local held stack is at least `100`, reducing belt clutter on big farms while keeping the normal `10`-item tail behavior. Harvest target ordering expands outward from the crate in square rings so the break pattern looks cleaner around the green crate. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not Auto Farmer-owned, and now process in 100-machine / 0.2s waves to smooth heavy honey days. Day-change systems use kickoff delays only, not full completion waits.
+- **Current `main` (unversioned after 1.6.1)** - Green Auto Farmer crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated Auto Farmer day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green Auto Farmer crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Large manual stack dumps from normal chests can temporarily use a stricter equalization plan across matching filters before falling back to round-robin. Daytime crate processing now uses active/idle schedulers so plain green vacuum crates, tool-equipped farmer crates, interacting black crates, active black crates, and idle black crates do not all poll at the same rate. Auto Farmer day-change harvesting is now wave-based for large fields: 4 crates work at once, each crate breaks 2 tiles per step with a 0.1s realtime pause, keeps its gathered items locally until that crate finishes, then starts dumping to the network. Fruit-tree farmers follow that same pacing while keeping their dedicated northwest-first quadrant targeting. Green-crate exports on multi-green-crate networks now use larger `100`-item chunks for stackable harvest output once the local held stack is at least `100`, reducing belt clutter on big farms while keeping the normal `10`-item tail behavior. Harvest target ordering expands outward from the crate in square rings so the break pattern looks cleaner around the green crate. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not Auto Farmer-owned, and now process in 100-machine / 0.2s waves to smooth heavy honey days. Shop stall stock is also patched to stay rebuyable instead of marking sold out after one purchase. Day-change systems use kickoff delays only, not full completion waits.
 - **1.6.1** - Fixed load-in catch-up processing so existing day-change outputs now run after loading into a save once the world, player, and chests are ready. Added fixed 1 second phasing between day-change harvest systems, quarry mining credit, and a subtle conveyor animation polish so items travel 30% into the destination tile before vanishing.
 - **1.5.2** - Large single-chest day-change arrays now scan through the full connected harvest network with no arbitrary connected-array/path scan cutoffs. Day-change conveyor launches are staggered in 100-item / 0.2s batches per destination chest so 1000+ machine arrays stay visual while reducing the launch spike.
 - **1.5.1** - Fixed player credit across all automation paths. Automated machine outputs now properly count for player progression when deposited into storage. Bee houses, key cutters, worm farms, crab pots, fish ponds, and bug terrariums also grant proper automation credit. Improved stability for large machine arrays.
@@ -804,6 +840,46 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Learnings
+
+### Large Crate Networks Need Active And Idle Modes
+Trying to run every green and black crate at the same fast cadence causes visible frame spikes on large farms even when nothing meaningful is happening.
+
+Rules:
+1. Keep green and black crates on separate round-robin schedulers instead of processing every special crate every `ScanInterval`.
+2. Plain green crates may do slow idle loose-drop sweeps, but tool-equipped farmer crates should not do generic daytime vacuum sweeps.
+3. Black filter crates should only stay hot while a player is interacting with them or while the network is actively routing through them.
+4. Route wake-ups are better than constant polling. If a route targets a black crate, wake that filter network instead of lowering idle cadence globally.
+5. Interacting filter crates must stay awake while the player is inside them so shift-click filter setup keeps feeling instant.
+
+### Large Farmer Arrays Must Hold Harvest Locally First
+The working large-farm pattern is not "harvest everything, then dump everything" and it is also not "every crate harvests and dumps at once." The stable middle ground is crate waves with local collection barriers.
+
+Rules:
+1. Day-change Auto Farmer harvests currently run in `4`-crate waves.
+2. Each active crate currently breaks `2` owned tiles per step, then immediately does its local vacuum pass.
+3. Use `WaitForSecondsRealtime` for the per-step harvest pacing so focus changes do not strand the harvest loop.
+4. A green crate must keep harvested items locally until that specific crate has finished its own harvest/gather pass.
+5. Only after that crate finishes local collection should it unlock dumping into the network.
+6. Fruit-tree farmers follow the same pacing and local-hold rules as crop farmers. Only their target selection differs.
+7. Shovel-based tree placement keeps its fixed quadrant order. Pacing changes must not rewrite the quadrant logic.
+
+### Large Farm Exports Need Chunking At Spawn Time, Not Visual Culling
+Per-frame conveyor culling caused more lag and visual instability. The safer fix is to reduce how many conveyor transfers get spawned for big farm outputs.
+
+Rules:
+1. Do not do per-frame hide/show culling on moving conveyor items.
+2. For large multi-green-crate farm networks, reduce clutter by increasing export chunk size before animation spawn.
+3. The current working rule is: if a green crate is on a connected network with more than one green crate, stackable exports use `100`-item chunks once the held stack is at least `100`, then fall back to normal `10`-item tail behavior.
+4. This large-chunk export rule is for green-crate harvest/output flushing only, not for every Autom8er conveyor use case.
+
+### Filter Equalization Should Only Help Large Manual Stock Dumps
+The stricter "divide by filter count" idea is useful when a player manually dumps a huge stable stack like seeds or fertilizer into one source chest. It is not a good universal rule for live drip-fed traffic.
+
+Rules:
+1. Keep normal round-robin behavior for machine drip-feed and other changing live traffic.
+2. Only enable stricter equalization for large stackable manual chest dumps into a stable filter network.
+3. Equalization is temporary startup guidance, not the permanent routing model.
+4. Clear temporary equalization state on save/load so stale quotas never leak into a new session.
 
 ### Use One Belt Cadence Everywhere
 Whenever a new feature pushes items onto conveyors, the safest visual rule is to reuse the main Autom8er scan cadence instead of inventing a local burst loop.
