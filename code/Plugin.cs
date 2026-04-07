@@ -62,11 +62,14 @@ namespace Autom8er
         public static bool AnimationEnabled = true;
         public static float AnimationSpeed = 2f;
         public static bool StackableCritters = true;
+        internal const int ACTIVE_FARMER_CRATES_PER_STEP = 4;
+        internal const int FARMER_ACTIONS_PER_STEP = 2;
+        internal const float FARMER_STEP_DELAY_SECONDS = 0.1f;
         private const float VACUUM_ACTIVE_SCAN_INTERVAL = 0.45f;
         private const float VACUUM_IDLE_SCAN_INTERVAL = 10f;
         private const float FILTER_ACTIVE_SCAN_INTERVAL = 0.45f;
         private const float FILTER_IDLE_SCAN_INTERVAL = 8f;
-        private const int MAX_ACTIVE_FARMER_CRATES_PER_PASS = 6;
+        private const int MAX_ACTIVE_FARMER_CRATES_PER_PASS = ACTIVE_FARMER_CRATES_PER_STEP;
         private const int MAX_ACTIVE_VACUUM_CRATES_PER_PASS = 4;
         private const int MAX_IDLE_VACUUM_CRATES_PER_PASS = 1;
         private const int MAX_INTERACTING_FILTER_CRATES_PER_PASS = 2;
@@ -997,6 +1000,7 @@ namespace Autom8er
         {
             ConveyorAnimator.ClearAllAnimations();
             ConveyorHelper.ClearFilterDistributionState();
+            FilterCrateHelper.ClearBulkDistributionState();
             QuarryHelper.ClearState();
         }
     }
@@ -1011,6 +1015,7 @@ namespace Autom8er
             ConveyorAnimator.ClearAllAnimations();
             ConveyorHelper.ClearPendingSorts();
             ConveyorHelper.ClearFilterDistributionState();
+            FilterCrateHelper.ClearBulkDistributionState();
             QuarryHelper.ClearState();
             Plugin.QueueLoadCatchUp();
         }
@@ -4214,23 +4219,27 @@ namespace Autom8er
 
     public static class VacuumCrateHelper
     {
+        private static readonly int[] dx = { -1, 0, 1, 0 };
+        private static readonly int[] dy = { 0, -1, 0, 1 };
         private const int FERTILIZER_ITEM_ID = 275;
         private const int VACUUM_HARVEST_RADIUS_TILES = 10;
         private const int VACUUM_PICKUP_RADIUS_TILES = 12;
-        private const int FARM_ACTIONS_PER_SCAN = 2;
+        private const int FARM_ACTIONS_PER_SCAN = Plugin.FARMER_ACTIONS_PER_STEP;
         private const float FARM_FOLLOW_UP_DELAY_SECONDS = 0.1f;
         private const float FARM_TILE_RESERVATION_SECONDS = 0.35f;
         private const float POST_DAY_CHANGE_HARVEST_FARM_DELAY_SECONDS = 0.3f;
         private const float VACUUM_ITEM_DELAY = 0.03f;
         private const float VACUUM_VISUAL_HEIGHT = 1.6f;
-        private const int DAY_CHANGE_HARVEST_CRATES_PER_WAVE = 4;
-        private const int DAY_CHANGE_HARVEST_TILES_PER_STEP = 2;
-        private const float DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS = 0.1f;
+        private const int DAY_CHANGE_HARVEST_CRATES_PER_WAVE = Plugin.ACTIVE_FARMER_CRATES_PER_STEP;
+        private const int DAY_CHANGE_HARVEST_TILES_PER_STEP = Plugin.FARMER_ACTIONS_PER_STEP;
+        private const float DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS = Plugin.FARMER_STEP_DELAY_SECONDS;
         private const float DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS = 0.05f;
         private const float VACUUM_STACK_BUFFER_SECONDS = 0.3f;
         private const int TRANSFER_STACK_CHUNK_SIZE = 10;
         private const int BULK_TRANSFER_STACK_THRESHOLD = 1000;
         private const int BULK_TRANSFER_CHUNK_SIZE = 100;
+        private const int MULTI_FARMER_VISUAL_CHUNK_THRESHOLD = 100;
+        private const float FARMER_NETWORK_SCALE_CACHE_SECONDS = 2f;
         private const float VACUUM_ACTIVE_WINDOW_SECONDS = 2.5f;
 
         private class VacuumVisualState
@@ -4284,6 +4293,12 @@ namespace Autom8er
             public float executeAt;
         }
 
+        private class FarmerNetworkScaleState
+        {
+            public bool useLargeChunking;
+            public float expireAt;
+        }
+
         private class DayChangeHarvestWaveState
         {
             public Chest chest;
@@ -4300,6 +4315,7 @@ namespace Autom8er
         private static readonly Dictionary<long, float> reservedFarmTiles = new Dictionary<long, float>();
         private static readonly List<PendingFarmAction> pendingFarmActions = new List<PendingFarmAction>();
         private static readonly Dictionary<long, float> activeCrateUntil = new Dictionary<long, float>();
+        private static readonly Dictionary<long, FarmerNetworkScaleState> farmerNetworkScaleCache = new Dictionary<long, FarmerNetworkScaleState>();
         private static bool dayChangeVacuumHarvestRunning = false;
         private static float farmerActionsBlockedUntil = 0f;
 
@@ -4754,7 +4770,7 @@ namespace Autom8er
                     continue;
 
                 FilterCrateHelper.MarkRouteActive(networkDestination.routeX, networkDestination.routeY, inside);
-                int moveAmount = Mathf.Min(GetTransferChunkSize(itemId, stackAmount), stackAmount);
+                int moveAmount = Mathf.Min(GetTransferChunkSize(chest, itemId, stackAmount), stackAmount);
                 int sourceSlot = slot;
                 int capturedItemId = itemId;
                 int capturedMoveAmount = moveAmount;
@@ -5022,6 +5038,7 @@ namespace Autom8er
             reservedFarmTiles.Clear();
             pendingFarmActions.Clear();
             activeCrateUntil.Clear();
+            farmerNetworkScaleCache.Clear();
         }
 
         private static bool IsDropInSameSpace(DroppedItem drop, HouseDetails inside)
@@ -5756,12 +5773,115 @@ namespace Autom8er
             return (chestKey << 20) ^ (uint)itemId;
         }
 
-        private static int GetTransferChunkSize(int itemId, int stackAmount)
+        private static int GetTransferChunkSize(Chest chest, int itemId, int stackAmount)
         {
             if (!Inventory.Instance.allItems[itemId].checkIfStackable())
                 return 1;
 
+            if (ShouldUseMultiFarmerChunking(chest))
+            {
+                if (stackAmount >= MULTI_FARMER_VISUAL_CHUNK_THRESHOLD)
+                    return BULK_TRANSFER_CHUNK_SIZE;
+
+                return TRANSFER_STACK_CHUNK_SIZE;
+            }
+
             return stackAmount >= BULK_TRANSFER_STACK_THRESHOLD ? BULK_TRANSFER_CHUNK_SIZE : TRANSFER_STACK_CHUNK_SIZE;
+        }
+
+        private static bool ShouldUseMultiFarmerChunking(Chest chest)
+        {
+            if (chest == null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, null))
+                return false;
+
+            long key = PosKey(chest.xPos, chest.yPos);
+            FarmerNetworkScaleState cachedState;
+            if (farmerNetworkScaleCache.TryGetValue(key, out cachedState) && cachedState != null && Time.time < cachedState.expireAt)
+                return cachedState.useLargeChunking;
+
+            bool useLargeChunking = HasMultipleFarmerCratesOnNetwork(chest);
+            farmerNetworkScaleCache[key] = new FarmerNetworkScaleState
+            {
+                useLargeChunking = useLargeChunking,
+                expireAt = Time.time + FARMER_NETWORK_SCALE_CACHE_SECONDS
+            };
+
+            return useLargeChunking;
+        }
+
+        private static bool HasMultipleFarmerCratesOnNetwork(Chest anchorChest)
+        {
+            if (anchorChest == null || WorldManager.Instance == null)
+                return false;
+
+            int greenCrateCount = 1;
+
+            if (Plugin.ConveyorTileType == -1)
+                return false;
+
+            HashSet<Vector2Int> visitedConveyors = new HashSet<Vector2Int>();
+            Queue<Vector2Int> queue = new Queue<Vector2Int>();
+            HashSet<long> seenGreenCrates = new HashSet<long>();
+            seenGreenCrates.Add(PosKey(anchorChest.xPos, anchorChest.yPos));
+
+            for (int i = 0; i < 4; i++)
+            {
+                int checkX = anchorChest.xPos + dx[i];
+                int checkY = anchorChest.yPos + dy[i];
+                if (checkX < 0 || checkY < 0)
+                    continue;
+
+                if (!ConveyorHelper.IsConveyorTile(checkX, checkY, null))
+                    continue;
+
+                Vector2Int pos = new Vector2Int(checkX, checkY);
+                if (visitedConveyors.Add(pos))
+                    queue.Enqueue(pos);
+            }
+
+            while (queue.Count > 0)
+            {
+                Vector2Int current = queue.Dequeue();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int crateX = current.x + dx[i];
+                    int crateY = current.y + dy[i];
+                    if (crateX < 0 || crateY < 0)
+                        continue;
+
+                    if (!ConveyorHelper.IsVacuumCrate(crateX, crateY, null))
+                        continue;
+
+                    long crateKey = PosKey(crateX, crateY);
+                    if (!seenGreenCrates.Add(crateKey))
+                        continue;
+
+                    greenCrateCount++;
+                    if (greenCrateCount >= 2)
+                        return true;
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nextX = current.x + dx[i];
+                    int nextY = current.y + dy[i];
+                    if (nextX < 0 || nextY < 0)
+                        continue;
+
+                    Vector2Int nextPos = new Vector2Int(nextX, nextY);
+                    if (visitedConveyors.Contains(nextPos))
+                        continue;
+
+                    if (ConveyorHelper.IsConveyorTile(nextX, nextY, null))
+                    {
+                        visitedConveyors.Add(nextPos);
+                        queue.Enqueue(nextPos);
+                    }
+                }
+            }
+
+            return false;
         }
 
         private static float GetVacuumFlushDelay()
@@ -6120,9 +6240,12 @@ namespace Autom8er
         private const int TRANSFER_STACK_CHUNK_SIZE = 10;
         private const int BULK_TRANSFER_STACK_THRESHOLD = 1000;
         private const int BULK_TRANSFER_CHUNK_SIZE = 100;
+        private const int BULK_DUMP_EQUALIZE_MIN_FILTERS = 2;
+        private const float BULK_DUMP_PLAN_TTL_SECONDS = 15f;
         private const float FILTER_ACTIVE_WINDOW_SECONDS = 5f;
         private static readonly Dictionary<long, float> activeCrateUntil = new Dictionary<long, float>();
         private static readonly Dictionary<long, float> networkWakeSpreadCooldownUntil = new Dictionary<long, float>();
+        private static readonly Dictionary<string, BulkDistributionPlan> bulkDistributionPlans = new Dictionary<string, BulkDistributionPlan>();
         private const float NETWORK_WAKE_SPREAD_COOLDOWN_SECONDS = 1.5f;
 
         private class SourcePull
@@ -6130,6 +6253,17 @@ namespace Autom8er
             public Chest sourceChest;
             public int sourceSlot;
             public int moveAmount;
+            public bool advanceCursorOnly;
+        }
+
+        private class BulkDistributionPlan
+        {
+            public string planKey;
+            public Dictionary<long, int> movedByDestination = new Dictionary<long, int>();
+            public int baseShare;
+            public int remainder;
+            public int destinationCount;
+            public float lastTouchedAt;
         }
 
         private static long PosKey(int x, int y)
@@ -6143,6 +6277,11 @@ namespace Autom8er
                 return;
 
             activeCrateUntil[PosKey(chest.xPos, chest.yPos)] = Time.time + FILTER_ACTIVE_WINDOW_SECONDS;
+        }
+
+        public static void ClearBulkDistributionState()
+        {
+            bulkDistributionPlans.Clear();
         }
 
         public static bool IsPlayerInteracting(Chest chest)
@@ -6291,9 +6430,15 @@ namespace Autom8er
                     }
                 }
 
-                SourcePull pull = FindSourcePull(filterChest, inside, itemId, destination.chest);
+                SourcePull pull = FindSourcePull(filterChest, inside, itemId, destination, filterDestinations);
                 if (pull == null)
                     continue;
+
+                if (pull.advanceCursorOnly)
+                {
+                    ConveyorHelper.AdvanceFilterDistributionCursor(filterDestinations, itemId, inside);
+                    return;
+                }
 
                 RemoveFromSourceChest(pull.sourceChest, pull.sourceSlot, itemId, pull.moveAmount, inside);
 
@@ -6326,7 +6471,7 @@ namespace Autom8er
             }
         }
 
-        private static SourcePull FindSourcePull(Chest filterChest, HouseDetails inside, int itemId, Chest destinationChest)
+        private static SourcePull FindSourcePull(Chest filterChest, HouseDetails inside, int itemId, ConveyorHelper.OutputDestination destination, List<ConveyorHelper.OutputDestination> filterDestinations)
         {
             if (Plugin.ConveyorTileType == -1)
                 return null;
@@ -6374,9 +6519,9 @@ namespace Autom8er
                     if (chest.xPos == filterChest.xPos && chest.yPos == filterChest.yPos)
                         continue;
 
-                    if (destinationChest != null &&
-                        chest.xPos == destinationChest.xPos &&
-                        chest.yPos == destinationChest.yPos)
+                    if (destination != null && destination.chest != null &&
+                        chest.xPos == destination.chest.xPos &&
+                        chest.yPos == destination.chest.yPos)
                         continue;
 
                     if (ConveyorHelper.IsOutputOnlyContainer(checkX, checkY, inside) ||
@@ -6399,7 +6544,16 @@ namespace Autom8er
                             continue;
 
                         int transferableAmount = GetTransferAmount(chest, slot, itemId);
-                        int moveAmount = Mathf.Min(GetTransferChunkSize(itemId, transferableAmount), transferableAmount);
+                        bool advanceCursorOnly;
+                        int moveAmount = GetPreferredMoveAmount(chest, slot, itemId, destination, filterDestinations, transferableAmount, out advanceCursorOnly);
+                        if (advanceCursorOnly)
+                        {
+                            return new SourcePull
+                            {
+                                advanceCursorOnly = true
+                            };
+                        }
+
                         if (moveAmount <= 0)
                             continue;
 
@@ -6443,6 +6597,214 @@ namespace Autom8er
 
             bool keepOne = Plugin.KeepOneItem && !ConveyorHelper.IsAutoSorter(sourceChest) && Inventory.Instance.allItems[itemId].checkIfStackable();
             return keepOne ? stack - 1 : stack;
+        }
+
+        private static int GetPreferredMoveAmount(Chest sourceChest, int slot, int itemId, ConveyorHelper.OutputDestination destination, List<ConveyorHelper.OutputDestination> filterDestinations, int transferableAmount, out bool advanceCursorOnly)
+        {
+            advanceCursorOnly = false;
+
+            if (!ShouldUseBulkDumpEqualization(sourceChest, itemId, filterDestinations, transferableAmount))
+                return Mathf.Min(GetTransferChunkSize(itemId, transferableAmount), transferableAmount);
+
+            BulkDistributionPlan plan = GetOrCreateBulkDistributionPlan(sourceChest, itemId, filterDestinations, transferableAmount);
+            if (plan == null || destination == null)
+                return Mathf.Min(GetTransferChunkSize(itemId, transferableAmount), transferableAmount);
+
+            PruneExpiredBulkDistributionPlans();
+
+            long destinationKey = BuildDestinationRouteKey(destination);
+            int targetShare = GetTargetShareForDestination(plan, filterDestinations, destination);
+            if (targetShare <= 0)
+                return Mathf.Min(GetTransferChunkSize(itemId, transferableAmount), transferableAmount);
+
+            int movedAmount;
+            if (!plan.movedByDestination.TryGetValue(destinationKey, out movedAmount))
+                movedAmount = 0;
+
+            int remainingShare = targetShare - movedAmount;
+            plan.lastTouchedAt = Time.time;
+
+            if (remainingShare <= 0)
+            {
+                if (IsBulkDistributionPlanSatisfied(plan, filterDestinations))
+                    bulkDistributionPlans.Remove(plan.planKey);
+                else
+                    advanceCursorOnly = true;
+
+                return 0;
+            }
+
+            int moveAmount = Mathf.Min(remainingShare, transferableAmount);
+            if (moveAmount > 0)
+                plan.movedByDestination[destinationKey] = movedAmount + moveAmount;
+
+            if (IsBulkDistributionPlanSatisfied(plan, filterDestinations))
+                bulkDistributionPlans.Remove(plan.planKey);
+
+            return moveAmount;
+        }
+
+        private static bool ShouldUseBulkDumpEqualization(Chest sourceChest, int itemId, List<ConveyorHelper.OutputDestination> filterDestinations, int transferableAmount)
+        {
+            if (sourceChest == null || itemId < 0 || transferableAmount <= 0 || filterDestinations == null)
+                return false;
+
+            if (!Inventory.Instance.allItems[itemId].checkIfStackable())
+                return false;
+
+            if (filterDestinations.Count < BULK_DUMP_EQUALIZE_MIN_FILTERS)
+                return false;
+
+            if (ConveyorHelper.IsAutoSorter(sourceChest) ||
+                ConveyorHelper.IsFilterCrate(sourceChest.xPos, sourceChest.yPos, null) ||
+                ConveyorHelper.IsVacuumCrate(sourceChest.xPos, sourceChest.yPos, null) ||
+                ConveyorHelper.IsSpecialContainer(sourceChest.xPos, sourceChest.yPos, null))
+            {
+                return false;
+            }
+
+            int minLargeDump = Mathf.Max(BULK_TRANSFER_STACK_THRESHOLD, filterDestinations.Count * TRANSFER_STACK_CHUNK_SIZE);
+            return transferableAmount >= minLargeDump;
+        }
+
+        private static BulkDistributionPlan GetOrCreateBulkDistributionPlan(Chest sourceChest, int itemId, List<ConveyorHelper.OutputDestination> filterDestinations, int transferableAmount)
+        {
+            if (sourceChest == null || filterDestinations == null || filterDestinations.Count == 0)
+                return null;
+
+            List<ConveyorHelper.OutputDestination> destinationsCopy = new List<ConveyorHelper.OutputDestination>(filterDestinations);
+            SortDestinationsByRoute(destinationsCopy);
+
+            string networkKey = BuildLocalFilterDistributionKey(destinationsCopy, itemId);
+            string planKey = BuildBulkDistributionPlanKey(sourceChest, itemId, networkKey);
+
+            BulkDistributionPlan plan;
+            if (bulkDistributionPlans.TryGetValue(planKey, out plan))
+            {
+                plan.lastTouchedAt = Time.time;
+                return plan;
+            }
+
+            plan = new BulkDistributionPlan
+            {
+                planKey = planKey,
+                destinationCount = destinationsCopy.Count,
+                baseShare = transferableAmount / destinationsCopy.Count,
+                remainder = transferableAmount % destinationsCopy.Count,
+                lastTouchedAt = Time.time
+            };
+
+            bulkDistributionPlans[planKey] = plan;
+            return plan;
+        }
+
+        private static string BuildBulkDistributionPlanKey(Chest sourceChest, int itemId, string networkKey)
+        {
+            string sourceKey = sourceChest.xPos + "," + sourceChest.yPos + "," + sourceChest.insideX + "," + sourceChest.insideY;
+            return sourceKey + "|" + itemId + "|" + networkKey;
+        }
+
+        private static int GetTargetShareForDestination(BulkDistributionPlan plan, List<ConveyorHelper.OutputDestination> filterDestinations, ConveyorHelper.OutputDestination destination)
+        {
+            if (plan == null || filterDestinations == null || destination == null)
+                return 0;
+
+            List<ConveyorHelper.OutputDestination> destinationsCopy = new List<ConveyorHelper.OutputDestination>(filterDestinations);
+            SortDestinationsByRoute(destinationsCopy);
+
+            for (int i = 0; i < destinationsCopy.Count; i++)
+            {
+                ConveyorHelper.OutputDestination candidate = destinationsCopy[i];
+                if (candidate.routeX != destination.routeX || candidate.routeY != destination.routeY)
+                    continue;
+
+                return plan.baseShare + (i < plan.remainder ? 1 : 0);
+            }
+
+            return 0;
+        }
+
+        private static bool IsBulkDistributionPlanSatisfied(BulkDistributionPlan plan, List<ConveyorHelper.OutputDestination> filterDestinations)
+        {
+            if (plan == null || filterDestinations == null)
+                return true;
+
+            List<ConveyorHelper.OutputDestination> destinationsCopy = new List<ConveyorHelper.OutputDestination>(filterDestinations);
+            SortDestinationsByRoute(destinationsCopy);
+
+            for (int i = 0; i < destinationsCopy.Count; i++)
+            {
+                ConveyorHelper.OutputDestination destination = destinationsCopy[i];
+                long destinationKey = BuildDestinationRouteKey(destination);
+                int movedAmount;
+                if (!plan.movedByDestination.TryGetValue(destinationKey, out movedAmount))
+                    movedAmount = 0;
+
+                int targetShare = plan.baseShare + (i < plan.remainder ? 1 : 0);
+                if (movedAmount < targetShare)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static long BuildDestinationRouteKey(ConveyorHelper.OutputDestination destination)
+        {
+            if (destination == null)
+                return 0L;
+
+            return (((long)destination.routeX & 0xFFFFFL) << 20) | ((long)destination.routeY & 0xFFFFFL);
+        }
+
+        private static void SortDestinationsByRoute(List<ConveyorHelper.OutputDestination> filterDestinations)
+        {
+            filterDestinations.Sort((a, b) =>
+            {
+                if (a.routeX != b.routeX)
+                    return a.routeX.CompareTo(b.routeX);
+
+                return a.routeY.CompareTo(b.routeY);
+            });
+        }
+
+        private static string BuildLocalFilterDistributionKey(List<ConveyorHelper.OutputDestination> filterDestinations, int itemId)
+        {
+            List<string> routeParts = new List<string>(filterDestinations.Count);
+            for (int i = 0; i < filterDestinations.Count; i++)
+            {
+                ConveyorHelper.OutputDestination destination = filterDestinations[i];
+                routeParts.Add(destination.routeX + "," + destination.routeY);
+            }
+
+            routeParts.Sort();
+            return "world|" + itemId + "|" + string.Join(";", routeParts.ToArray());
+        }
+
+        private static void PruneExpiredBulkDistributionPlans()
+        {
+            if (bulkDistributionPlans.Count == 0)
+                return;
+
+            List<string> expiredKeys = null;
+            float now = Time.time;
+
+            foreach (KeyValuePair<string, BulkDistributionPlan> entry in bulkDistributionPlans)
+            {
+                if (now - entry.Value.lastTouchedAt <= BULK_DUMP_PLAN_TTL_SECONDS)
+                    continue;
+
+                if (expiredKeys == null)
+                    expiredKeys = new List<string>();
+                expiredKeys.Add(entry.Key);
+            }
+
+            if (expiredKeys == null)
+                return;
+
+            for (int i = 0; i < expiredKeys.Count; i++)
+            {
+                bulkDistributionPlans.Remove(expiredKeys[i]);
+            }
         }
 
         private static int GetTransferChunkSize(int itemId, int stackAmount)
