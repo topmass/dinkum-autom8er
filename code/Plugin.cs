@@ -1026,6 +1026,27 @@ namespace Autom8er
         }
     }
 
+    [HarmonyPatch(typeof(ShopManager), "sellStall")]
+    public static class ShopManagerUnlimitedStockPatch
+    {
+        static bool Prefix(int type, int id)
+        {
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(ShopBuyDrop), "sold", new System.Type[] { typeof(bool) })]
+    public static class ShopBuyDropUnlimitedStockPatch
+    {
+        static bool Prefix(ShopBuyDrop __instance)
+        {
+            if (__instance == null)
+                return true;
+
+            return __instance.shopStallNo < 0;
+        }
+    }
+
     // Patch to trigger harvest processing after day change completes
     // This is much more efficient than continuous scanning since growth machines
     // (bee houses, key cutters, worm farms, crab pots) only update on day change
