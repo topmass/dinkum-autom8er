@@ -4345,6 +4345,22 @@ namespace Autom8er
             public bool pendingFinalCollectionSweep;
         }
 
+        private class DayChangeFarmerWaveState
+        {
+            public Chest chest;
+        }
+
+        private class ReplantTilePlan
+        {
+            public int xPos;
+            public int yPos;
+            public int distance;
+            public bool shouldHoe;
+            public bool shouldFertilize;
+            public int seedItemId = -1;
+            public int priorityScore;
+        }
+
         private static readonly Dictionary<long, VacuumVisualState> activeVisuals = new Dictionary<long, VacuumVisualState>();
         private static readonly HashSet<uint> pendingDrops = new HashSet<uint>();
         private static readonly HashSet<long> harvestCollectingCrates = new HashSet<long>();
@@ -4549,6 +4565,63 @@ namespace Autom8er
                 }
 
                 if (waveEnd < outdoorVacuumCrates.Count && DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS > 0f)
+                    yield return new WaitForSecondsRealtime(DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS);
+            }
+
+            if (Plugin.DAY_CHANGE_FINAL_COLLECTION_SETTLE_SECONDS > 0f)
+                yield return new WaitForSecondsRealtime(Plugin.DAY_CHANGE_FINAL_COLLECTION_SETTLE_SECONDS);
+
+            List<Chest> outdoorFarmerCrates = new List<Chest>();
+            for (int i = 0; i < outdoorVacuumCrates.Count; i++)
+            {
+                Chest chest = outdoorVacuumCrates[i];
+                if (chest == null || !IsFarmerCrate(chest))
+                    continue;
+
+                outdoorFarmerCrates.Add(chest);
+            }
+
+            for (int waveStart = 0; waveStart < outdoorFarmerCrates.Count; waveStart += DAY_CHANGE_HARVEST_CRATES_PER_WAVE)
+            {
+                int waveEnd = Mathf.Min(outdoorFarmerCrates.Count, waveStart + DAY_CHANGE_HARVEST_CRATES_PER_WAVE);
+                List<DayChangeFarmerWaveState> waveStates = new List<DayChangeFarmerWaveState>(waveEnd - waveStart);
+
+                for (int crateIndex = waveStart; crateIndex < waveEnd; crateIndex++)
+                {
+                    waveStates.Add(new DayChangeFarmerWaveState
+                    {
+                        chest = outdoorFarmerCrates[crateIndex]
+                    });
+                }
+
+                while (true)
+                {
+                    bool didAnyWork = false;
+
+                for (int crateIndex = 0; crateIndex < waveStates.Count; crateIndex++)
+                {
+                    DayChangeFarmerWaveState state = waveStates[crateIndex];
+                    if (state == null || state.chest == null)
+                        continue;
+
+                    int workDone = TryProcessBundledCropReplantStep(state.chest);
+                    if (workDone <= 0)
+                        workDone = TryProcessFarmTileCore(state.chest, ignoreSuspension: true);
+
+                    if (workDone > 0)
+                        didAnyWork = true;
+                }
+
+                    if (ProcessPendingFarmActions(ignoreSuspension: true) > 0)
+                        didAnyWork = true;
+
+                    if (!didAnyWork && !HasPendingFarmActionsForAny(outdoorFarmerCrates, waveStart, waveEnd))
+                        break;
+
+                    yield return new WaitForSecondsRealtime(DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS);
+                }
+
+                if (waveEnd < outdoorFarmerCrates.Count && DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS > 0f)
                     yield return new WaitForSecondsRealtime(DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS);
             }
 
@@ -4891,19 +4964,36 @@ namespace Autom8er
             if (AreFarmerActionsSuspended())
                 return;
 
+            TryProcessFarmTileCore(chest, ignoreSuspension: false);
+        }
+
+        private static int TryProcessFarmTileCore(Chest chest, bool ignoreSuspension)
+        {
+            if (chest == null)
+                return 0;
+
+            if (!ignoreSuspension && AreFarmerActionsSuspended())
+                return 0;
+
+            int actionsCompleted = 0;
             for (int action = 0; action < FARM_ACTIONS_PER_SCAN; action++)
             {
                 if (!TryProcessOneFarmAction(chest))
-                    return;
+                    break;
+
+                actionsCompleted++;
             }
+
+            return actionsCompleted;
         }
 
         private static bool TryProcessOneFarmAction(Chest chest)
         {
+            bool hasHoeTool = HasHoeTool(chest);
             int fertilizerSlot = FindItemSlot(chest, IsFertilizerItem);
             bool hasFertilizer = fertilizerSlot != -1;
 
-            if (hasFertilizer && TryFindBestFarmTile(chest, CanFertilizeTile, out FarmTileTarget fertilizeTarget))
+            if (hasHoeTool && hasFertilizer && TryFindBestFarmTile(chest, CanFertilizeTile, out FarmTileTarget fertilizeTarget))
             {
                 ApplyFertilizerAt(chest, fertilizerSlot, fertilizeTarget.xPos, fertilizeTarget.yPos);
                 MarkCrateActive(chest);
@@ -4913,22 +5003,25 @@ namespace Autom8er
                 return true;
             }
 
-            for (int slot = 0; slot < chest.itemIds.Length; slot++)
+            if (hasHoeTool)
             {
-                int itemId = chest.itemIds[slot];
-                if (!IsCropSeedItem(itemId))
-                    continue;
+                for (int slot = 0; slot < chest.itemIds.Length; slot++)
+                {
+                    int itemId = chest.itemIds[slot];
+                    if (!IsCropSeedItem(itemId))
+                        continue;
 
-                if (!TryFindBestFarmTile(chest, (xPos, yPos) => CanPlantSeedAt(itemId, xPos, yPos), out FarmTileTarget plantTarget))
-                    continue;
+                    if (!TryFindBestFarmTile(chest, (xPos, yPos) => CanPlantSeedAt(itemId, xPos, yPos), out FarmTileTarget plantTarget))
+                        continue;
 
-                PlantSeedAt(chest, slot, itemId, plantTarget.xPos, plantTarget.yPos);
-                MarkCrateActive(chest);
-                return true;
+                    PlantSeedAt(chest, slot, itemId, plantTarget.xPos, plantTarget.yPos);
+                    MarkCrateActive(chest);
+                    return true;
+                }
             }
 
-            bool shouldTill = hasFertilizer || HasAnyCropSeed(chest);
-            if (shouldTill && HasHoeTool(chest) && TryFindBestFarmTile(chest, CanHoeTile, out FarmTileTarget hoeTarget))
+            bool shouldTill = hasHoeTool && (hasFertilizer || HasAnyCropSeed(chest));
+            if (shouldTill && TryFindBestFarmTile(chest, CanHoeTile, out FarmTileTarget hoeTarget))
             {
                 HoeTileAt(hoeTarget.xPos, hoeTarget.yPos);
                 MarkCrateActive(chest);
@@ -4955,6 +5048,169 @@ namespace Autom8er
             }
 
             return false;
+        }
+
+        private static int TryProcessBundledCropReplantStep(Chest chest)
+        {
+            if (chest == null || !HasHoeTool(chest))
+                return 0;
+
+            int processedTiles = 0;
+
+            for (int action = 0; action < FARM_ACTIONS_PER_SCAN; action++)
+            {
+                int seedItemId = GetFirstCropSeedItemId(chest);
+                bool hasSeed = seedItemId >= 0;
+                bool hasFertilizer = FindItemSlot(chest, IsFertilizerItem) != -1;
+
+                if (!hasSeed && !hasFertilizer)
+                    break;
+
+                if (!TryFindBestBundledReplantTile(chest, seedItemId, hasFertilizer, out ReplantTilePlan plan))
+                    break;
+
+                bool didWork = false;
+
+                if (plan.shouldHoe)
+                {
+                    HoeTileAt(plan.xPos, plan.yPos);
+                    didWork = true;
+                }
+
+                if (plan.shouldFertilize)
+                {
+                    int fertilizerSlot = FindItemSlot(chest, IsFertilizerItem);
+                    if (fertilizerSlot != -1 && CanFertilizeEmptyTile(plan.xPos, plan.yPos))
+                    {
+                        ApplyFertilizerAt(chest, fertilizerSlot, plan.xPos, plan.yPos);
+                        didWork = true;
+                    }
+                }
+
+                if (plan.seedItemId >= 0)
+                {
+                    int seedSlot = FindItemSlot(chest, itemId => itemId == plan.seedItemId);
+                    if (seedSlot != -1 && CanPlantSeedAt(plan.seedItemId, plan.xPos, plan.yPos))
+                    {
+                        PlantSeedAt(chest, seedSlot, plan.seedItemId, plan.xPos, plan.yPos);
+                        didWork = true;
+                    }
+                }
+
+                if (!didWork)
+                    break;
+
+                MarkCrateActive(chest);
+                processedTiles++;
+            }
+
+            return processedTiles;
+        }
+
+        private static bool TryFindBestBundledReplantTile(Chest chest, int seedItemId, bool hasFertilizer, out ReplantTilePlan bestPlan)
+        {
+            bestPlan = null;
+            if (chest == null || WorldManager.Instance == null)
+                return false;
+
+            bool hasSeed = seedItemId >= 0;
+            if (!hasSeed && !hasFertilizer)
+                return false;
+
+            int[,] onTileMap = WorldManager.Instance.onTileMap;
+            int[,] tileTypeMap = WorldManager.Instance.tileTypeMap;
+            if (onTileMap == null || tileTypeMap == null)
+                return false;
+
+            int mapW = Mathf.Min(onTileMap.GetLength(0), tileTypeMap.GetLength(0));
+            int mapH = Mathf.Min(onTileMap.GetLength(1), tileTypeMap.GetLength(1));
+            int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minY = Mathf.Max(0, chest.yPos - VACUUM_HARVEST_RADIUS_TILES);
+            int maxY = Mathf.Min(mapH - 1, chest.yPos + VACUUM_HARVEST_RADIUS_TILES);
+
+            for (int x = minX; x <= maxX; x++)
+            {
+                for (int y = minY; y <= maxY; y++)
+                {
+                    if (!TryBuildBundledReplantPlan(chest, seedItemId, hasFertilizer, x, y, out ReplantTilePlan candidate))
+                        continue;
+
+                    if (bestPlan == null ||
+                        candidate.priorityScore > bestPlan.priorityScore ||
+                        (candidate.priorityScore == bestPlan.priorityScore && candidate.distance < bestPlan.distance) ||
+                        (candidate.priorityScore == bestPlan.priorityScore && candidate.distance == bestPlan.distance &&
+                            (y < bestPlan.yPos || (y == bestPlan.yPos && x < bestPlan.xPos))))
+                    {
+                        bestPlan = candidate;
+                    }
+                }
+            }
+
+            return bestPlan != null;
+        }
+
+        private static bool TryBuildBundledReplantPlan(Chest chest, int seedItemId, bool hasFertilizer, int xPos, int yPos, out ReplantTilePlan plan)
+        {
+            plan = null;
+            if (chest == null || !IsOutdoorFarmTileInRange(xPos, yPos))
+                return false;
+
+            bool hasSeed = seedItemId >= 0;
+            bool canHoe = CanHoeTile(xPos, yPos);
+            bool canFertilize = hasFertilizer && CanFertilizeEmptyTile(xPos, yPos);
+            bool canPlant = hasSeed && CanPlantSeedAt(seedItemId, xPos, yPos);
+
+            bool canHoeThenFertilize = false;
+            bool canHoeThenPlant = false;
+
+            if (canHoe)
+            {
+                int tilledTileType = WeatherManager.Instance != null && WeatherManager.Instance.IsRaining ? 8 : 7;
+                canHoeThenFertilize = hasFertilizer && IsEmptyFarmObject(xPos, yPos) && (tilledTileType == 7 || tilledTileType == 8);
+                canHoeThenPlant = hasSeed && IsEmptyFarmObjectAfterHoe(xPos, yPos) && SeedCanPlantOnTilledTile(seedItemId, tilledTileType);
+            }
+
+            bool shouldHoe = false;
+            bool shouldFertilize = false;
+            int plannedSeedItemId = -1;
+
+            if (canHoe && (canHoeThenFertilize || canHoeThenPlant || (!hasSeed && !hasFertilizer)))
+            {
+                shouldHoe = true;
+                shouldFertilize = canHoeThenFertilize;
+                if (canHoeThenPlant)
+                    plannedSeedItemId = seedItemId;
+            }
+            else if (canFertilize || canPlant)
+            {
+                shouldFertilize = canFertilize;
+                if (canPlant)
+                    plannedSeedItemId = seedItemId;
+            }
+
+            if (!shouldHoe && !shouldFertilize && plannedSeedItemId < 0)
+                return false;
+
+            int priority = 0;
+            if (shouldHoe)
+                priority += 1;
+            if (shouldFertilize)
+                priority += 2;
+            if (plannedSeedItemId >= 0)
+                priority += 4;
+
+            plan = new ReplantTilePlan
+            {
+                xPos = xPos,
+                yPos = yPos,
+                distance = Mathf.Abs(xPos - chest.xPos) + Mathf.Abs(yPos - chest.yPos),
+                shouldHoe = shouldHoe,
+                shouldFertilize = shouldFertilize,
+                seedItemId = plannedSeedItemId,
+                priorityScore = priority
+            };
+            return true;
         }
 
         private static List<HarvestTarget> CollectNearbyHarvestTargets(Chest chest, HouseDetails inside, HashSet<long> claimedHarvestTiles)
@@ -5208,6 +5464,7 @@ namespace Autom8er
             if (HasPendingFarmActionsForChest(chest))
                 return true;
 
+            bool hasHoeTool = HasHoeTool(chest);
             bool hasShovelTool = HasShovelTool(chest);
 
             for (int slot = 0; slot < chest.itemIds.Length; slot++)
@@ -5217,7 +5474,7 @@ namespace Autom8er
                 if (itemId < 0 || stackAmount <= 0)
                     continue;
 
-                if (IsFertilizerItem(itemId) || IsCropSeedItem(itemId))
+                if (hasHoeTool && (IsFertilizerItem(itemId) || IsCropSeedItem(itemId)))
                     return true;
 
                 if (hasShovelTool && IsTreePlantingItem(itemId) && ShouldRetainForAutoFarmer(chest, itemId))
@@ -5459,6 +5716,11 @@ namespace Autom8er
             return tileType == 7 || tileType == 8;
         }
 
+        private static bool CanFertilizeEmptyTile(int xPos, int yPos)
+        {
+            return CanFertilizeTile(xPos, yPos) && IsEmptyFarmObject(xPos, yPos);
+        }
+
         private static bool CanPlantSeedAt(int itemId, int xPos, int yPos)
         {
             if (!IsCropSeedItem(itemId) || !IsOutdoorFarmTileInRange(xPos, yPos))
@@ -5470,6 +5732,33 @@ namespace Autom8er
 
             int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
             return tileObjectId == -1 || tileObjectId == 30;
+        }
+
+        private static bool SeedCanPlantOnTilledTile(int itemId, int tileType)
+        {
+            if (!IsCropSeedItem(itemId))
+                return false;
+
+            return tileType == 7 || tileType == 8 || tileType == 12 || tileType == 13;
+        }
+
+        private static bool IsEmptyFarmObject(int xPos, int yPos)
+        {
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            return tileObjectId == -1 || tileObjectId == 30;
+        }
+
+        private static bool IsEmptyFarmObjectAfterHoe(int xPos, int yPos)
+        {
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            if (tileObjectId == -1 || tileObjectId == 30)
+                return true;
+
+            if (tileObjectId < 0 || tileObjectId >= WorldManager.Instance.allObjectSettings.Length)
+                return false;
+
+            TileObjectSettings settings = WorldManager.Instance.allObjectSettings[tileObjectId];
+            return settings != null && settings.isGrass;
         }
 
         private static bool CanPlantTreeAt(int itemId, int xPos, int yPos)
@@ -5541,6 +5830,7 @@ namespace Autom8er
             ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
             int tilledTileType = WeatherManager.Instance != null && WeatherManager.Instance.IsRaining ? 8 : 7;
             NetworkMapSharer.Instance.RpcUpdateTileType(tilledTileType, xPos, yPos);
+            WorldManager.Instance.tileTypeMap[xPos, yPos] = tilledTileType;
 
             int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
             if (tileObjectId > -1 &&
@@ -5549,6 +5839,7 @@ namespace Autom8er
                 WorldManager.Instance.allObjectSettings[tileObjectId].isGrass)
             {
                 NetworkMapSharer.Instance.RpcUpdateOnTileObject(-1, xPos, yPos);
+                WorldManager.Instance.onTileMap[xPos, yPos] = -1;
             }
         }
 
@@ -5561,6 +5852,7 @@ namespace Autom8er
             ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
             int newTileType = fertilizer.getResultingPlaceableTileType(WorldManager.Instance.tileTypeMap[xPos, yPos]);
             NetworkMapSharer.Instance.RpcUpdateTileType(newTileType, xPos, yPos);
+            WorldManager.Instance.tileTypeMap[xPos, yPos] = newTileType;
             ConsumeOneItem(chest, slot);
         }
 
@@ -5572,6 +5864,8 @@ namespace Autom8er
 
             ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
             NetworkMapSharer.Instance.RpcUpdateOnTileObject(seed.placeable.tileObjectId, xPos, yPos);
+            WorldManager.Instance.onTileMap[xPos, yPos] = seed.placeable.tileObjectId;
+            WorldManager.Instance.onTileStatusMap[xPos, yPos] = 0;
             ConsumeOneItem(chest, slot);
             AutomationCreditHelper.TryGrantPlantSeedCredit();
         }
@@ -5639,13 +5933,15 @@ namespace Autom8er
                 ReserveFarmTile(tileX, tileY, nextAt + FARM_TILE_RESERVATION_SECONDS);
         }
 
-        private static void ProcessPendingFarmActions()
+        private static int ProcessPendingFarmActions(bool ignoreSuspension = false)
         {
-            if (AreFarmerActionsSuspended())
-                return;
+            if (!ignoreSuspension && AreFarmerActionsSuspended())
+                return 0;
 
             if (pendingFarmActions.Count == 0)
-                return;
+                return 0;
+
+            int processed = 0;
 
             for (int i = pendingFarmActions.Count - 1; i >= 0; i--)
             {
@@ -5672,20 +5968,30 @@ namespace Autom8er
                     {
                         int slot = FindItemSlot(chest, IsFertilizerItem);
                         if (slot != -1 && CanFertilizeTileNow(action.tileX, action.tileY))
+                        {
                             ApplyFertilizerAt(chest, slot, action.tileX, action.tileY);
+                            MarkCrateActive(chest);
+                            processed++;
+                        }
                         break;
                     }
                     case PendingFarmActionType.PlantSeed:
                     {
                         int slot = FindItemSlot(chest, itemId => itemId == action.itemId);
                         if (slot != -1 && CanPlantSeedAtNow(action.itemId, action.tileX, action.tileY))
+                        {
                             PlantSeedAt(chest, slot, action.itemId, action.tileX, action.tileY);
+                            MarkCrateActive(chest);
+                            processed++;
+                        }
                         break;
                     }
                 }
 
                 pendingFarmActions.RemoveAt(i);
             }
+
+            return processed;
         }
 
         private static void BeginDayChangeHarvestPhase()
@@ -5707,6 +6013,37 @@ namespace Autom8er
         private static bool AreFarmerActionsSuspended()
         {
             return dayChangeVacuumHarvestRunning || Time.time < farmerActionsBlockedUntil;
+        }
+
+        private static bool HasPendingFarmActionsForAny(List<Chest> chests, int startIndex, int endIndex)
+        {
+            if (chests == null || pendingFarmActions.Count == 0)
+                return false;
+
+            HashSet<long> waveChestKeys = new HashSet<long>();
+            for (int i = startIndex; i < endIndex && i < chests.Count; i++)
+            {
+                Chest chest = chests[i];
+                if (chest == null)
+                    continue;
+
+                waveChestKeys.Add(PosKey(chest.xPos, chest.yPos));
+            }
+
+            if (waveChestKeys.Count == 0)
+                return false;
+
+            for (int i = 0; i < pendingFarmActions.Count; i++)
+            {
+                PendingFarmAction action = pendingFarmActions[i];
+                if (action == null)
+                    continue;
+
+                if (waveChestKeys.Contains(PosKey(action.chestX, action.chestY)))
+                    return true;
+            }
+
+            return false;
         }
 
         private static bool CanFertilizeTileNow(int xPos, int yPos)
