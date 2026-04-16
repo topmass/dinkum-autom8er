@@ -6993,6 +6993,9 @@ namespace Autom8er
             if (stack <= 0)
                 return 0;
 
+            if (IsDurabilityTransferItem(itemId))
+                return stack;
+
             bool keepOne = Plugin.KeepOneItem && !ConveyorHelper.IsAutoSorter(sourceChest) && Inventory.Instance.allItems[itemId].checkIfStackable();
             return keepOne ? stack - 1 : stack;
         }
@@ -7000,6 +7003,9 @@ namespace Autom8er
         private static int GetPreferredMoveAmount(Chest sourceChest, int slot, int itemId, ConveyorHelper.OutputDestination destination, List<ConveyorHelper.OutputDestination> filterDestinations, int transferableAmount, out bool advanceCursorOnly)
         {
             advanceCursorOnly = false;
+
+            if (IsDurabilityTransferItem(itemId))
+                return transferableAmount;
 
             if (!ShouldUseBulkDumpEqualization(sourceChest, itemId, filterDestinations, transferableAmount))
                 return Mathf.Min(GetTransferChunkSize(itemId, transferableAmount), transferableAmount);
@@ -7060,6 +7066,9 @@ namespace Autom8er
             {
                 return false;
             }
+
+            if (HasActiveBulkDistributionPlan(sourceChest, itemId, filterDestinations))
+                return true;
 
             int minLargeDump = Mathf.Max(BULK_TRANSFER_STACK_THRESHOLD, filterDestinations.Count * TRANSFER_STACK_CHUNK_SIZE);
             return transferableAmount >= minLargeDump;
@@ -7215,6 +7224,12 @@ namespace Autom8er
 
         private static void RemoveFromSourceChest(Chest sourceChest, int slot, int itemId, int moveAmount, HouseDetails inside)
         {
+            if (IsDurabilityTransferItem(itemId))
+            {
+                ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, -1, 0, inside);
+                return;
+            }
+
             int remaining = sourceChest.itemStacks[slot] - moveAmount;
             if (remaining <= 0)
             {
@@ -7223,6 +7238,39 @@ namespace Autom8er
             }
 
             ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, itemId, remaining, inside);
+        }
+
+        private static bool IsDurabilityTransferItem(int itemId)
+        {
+            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            return item != null && item.hasFuel && !item.checkIfStackable();
+        }
+
+        private static bool HasActiveBulkDistributionPlan(Chest sourceChest, int itemId, List<ConveyorHelper.OutputDestination> filterDestinations)
+        {
+            if (sourceChest == null || itemId < 0 || filterDestinations == null || filterDestinations.Count == 0)
+                return false;
+
+            List<ConveyorHelper.OutputDestination> destinationsCopy = new List<ConveyorHelper.OutputDestination>(filterDestinations);
+            SortDestinationsByRoute(destinationsCopy);
+
+            string networkKey = BuildLocalFilterDistributionKey(destinationsCopy, itemId);
+            string planKey = BuildBulkDistributionPlanKey(sourceChest, itemId, networkKey);
+
+            BulkDistributionPlan plan;
+            if (!bulkDistributionPlans.TryGetValue(planKey, out plan) || plan == null)
+                return false;
+
+            if (Time.time - plan.lastTouchedAt > BULK_DUMP_PLAN_TTL_SECONDS)
+            {
+                bulkDistributionPlans.Remove(planKey);
+                return false;
+            }
+
+            return !IsBulkDistributionPlanSatisfied(plan, destinationsCopy);
         }
     }
 
