@@ -113,6 +113,55 @@ namespace Autom8er
             Log.LogWarning(message);
         }
 
+        internal static bool IsDurabilityTransferItem(int itemId)
+        {
+            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            return item != null && item.hasFuel && !item.checkIfStackable();
+        }
+        internal static int GetTransferableAmountFromChest(Chest sourceChest, int slot, int itemId, bool allowKeepOne)
+        {
+            if (sourceChest == null || slot < 0 || slot >= sourceChest.itemStacks.Length)
+                return 0;
+
+            int stackAmount = sourceChest.itemStacks[slot];
+            if (stackAmount <= 0)
+                return 0;
+
+            if (Plugin.IsDurabilityTransferItem(itemId))
+                return stackAmount;
+
+            bool keepOne = allowKeepOne &&
+                KeepOneItem &&
+                !ConveyorHelper.IsAutoSorter(sourceChest) &&
+                Inventory.Instance.allItems[itemId].checkIfStackable();
+
+            return keepOne ? stackAmount - 1 : stackAmount;
+        }
+
+        internal static void RemoveTransferredItemFromChest(Chest sourceChest, int slot, int itemId, int moveAmount, HouseDetails inside)
+        {
+            if (sourceChest == null || slot < 0 || slot >= sourceChest.itemStacks.Length)
+                return;
+
+            if (Plugin.IsDurabilityTransferItem(itemId))
+            {
+                ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, -1, 0, inside);
+                return;
+            }
+
+            int remaining = sourceChest.itemStacks[slot] - moveAmount;
+            if (remaining <= 0)
+            {
+                ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, -1, 0, inside);
+                return;
+            }
+
+            ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, itemId, remaining, inside);
+        }
+
         private void Awake()
         {
             Log = Logger;
@@ -4717,7 +4766,7 @@ namespace Autom8er
             if (chest == null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, inside))
                 return 0f;
 
-            if (WorldManager.Instance == null || Inventory.Instance == null || WorldManager.Instance.itemsOnGround == null)
+            if (WorldManager.Instance == null || WorldManager.Instance.itemsOnGround == null)
                 return 0f;
 
             ConveyorHelper.EnsureAutomationChestsActive(chest);
@@ -4904,7 +4953,7 @@ namespace Autom8er
                     continue;
 
                 FilterCrateHelper.MarkRouteActive(networkDestination.routeX, networkDestination.routeY, inside);
-                bool isDurabilityTransfer = IsDurabilityTransferItem(itemId);
+                bool isDurabilityTransfer = Plugin.IsDurabilityTransferItem(itemId);
                 int moveAmount = isDurabilityTransfer
                     ? stackAmount
                     : Mathf.Min(GetTransferChunkSize(chest, itemId, stackAmount), stackAmount);
@@ -4916,15 +4965,7 @@ namespace Autom8er
                 int capturedRouteX = networkDestination.routeX;
                 int capturedRouteY = networkDestination.routeY;
 
-                int remaining = isDurabilityTransfer ? 0 : stackAmount - moveAmount;
-                if (remaining > 0)
-                {
-                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, sourceSlot, itemId, remaining, inside);
-                }
-                else
-                {
-                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, sourceSlot, -1, 0, inside);
-                }
+                Plugin.RemoveTransferredItemFromChest(chest, sourceSlot, itemId, moveAmount, inside);
 
                 ClearPendingFlush(chest, capturedItemId);
 
@@ -4951,18 +4992,8 @@ namespace Autom8er
                     inside, depositToNetwork);
 
                 MarkCrateActive(chest);
-                TriggerVacuumVisual(chest.xPos, chest.yPos, GetVacuumFlushDelay() + 0.2f);
                 return;
             }
-        }
-
-        private static bool IsDurabilityTransferItem(int itemId)
-        {
-            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
-                return false;
-
-            InventoryItem item = Inventory.Instance.allItems[itemId];
-            return item != null && item.hasFuel && !item.checkIfStackable();
         }
 
         public static void TryProcessFarmTile(Chest chest, HouseDetails inside)
@@ -5521,7 +5552,7 @@ namespace Autom8er
 
         private static bool IsHoeToolItem(int itemId)
         {
-            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+            if (itemId < 0 || itemId >= Inventory.Instance.allItems.Length)
                 return false;
 
             InventoryItem item = Inventory.Instance.allItems[itemId];
@@ -5533,7 +5564,7 @@ namespace Autom8er
 
         private static bool IsShovelToolItem(int itemId)
         {
-            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+            if (itemId < 0 || itemId >= Inventory.Instance.allItems.Length)
                 return false;
 
             InventoryItem item = Inventory.Instance.allItems[itemId];
@@ -5545,7 +5576,7 @@ namespace Autom8er
 
         private static bool IsCropSeedItem(int itemId)
         {
-            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+            if (itemId < 0 || itemId >= Inventory.Instance.allItems.Length)
                 return false;
 
             InventoryItem item = Inventory.Instance.allItems[itemId];
@@ -5557,7 +5588,7 @@ namespace Autom8er
 
         private static bool IsTreePlantingItem(int itemId)
         {
-            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+            if (itemId < 0 || itemId >= Inventory.Instance.allItems.Length)
                 return false;
 
             InventoryItem item = Inventory.Instance.allItems[itemId];
@@ -7001,22 +7032,14 @@ namespace Autom8er
 
         private static int GetTransferAmount(Chest sourceChest, int slot, int itemId)
         {
-            int stack = sourceChest.itemStacks[slot];
-            if (stack <= 0)
-                return 0;
-
-            if (IsDurabilityTransferItem(itemId))
-                return stack;
-
-            bool keepOne = Plugin.KeepOneItem && !ConveyorHelper.IsAutoSorter(sourceChest) && Inventory.Instance.allItems[itemId].checkIfStackable();
-            return keepOne ? stack - 1 : stack;
+            return Plugin.GetTransferableAmountFromChest(sourceChest, slot, itemId, allowKeepOne: true);
         }
 
         private static int GetPreferredMoveAmount(Chest sourceChest, int slot, int itemId, ConveyorHelper.OutputDestination destination, List<ConveyorHelper.OutputDestination> filterDestinations, int transferableAmount, out bool advanceCursorOnly)
         {
             advanceCursorOnly = false;
 
-            if (IsDurabilityTransferItem(itemId))
+            if (Plugin.IsDurabilityTransferItem(itemId))
                 return transferableAmount;
 
             if (!ShouldUseBulkDumpEqualization(sourceChest, itemId, filterDestinations, transferableAmount))
@@ -7236,29 +7259,7 @@ namespace Autom8er
 
         private static void RemoveFromSourceChest(Chest sourceChest, int slot, int itemId, int moveAmount, HouseDetails inside)
         {
-            if (IsDurabilityTransferItem(itemId))
-            {
-                ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, -1, 0, inside);
-                return;
-            }
-
-            int remaining = sourceChest.itemStacks[slot] - moveAmount;
-            if (remaining <= 0)
-            {
-                ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, -1, 0, inside);
-                return;
-            }
-
-            ContainerManager.manage.changeSlotInChest(sourceChest.xPos, sourceChest.yPos, slot, itemId, remaining, inside);
-        }
-
-        private static bool IsDurabilityTransferItem(int itemId)
-        {
-            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
-                return false;
-
-            InventoryItem item = Inventory.Instance.allItems[itemId];
-            return item != null && item.hasFuel && !item.checkIfStackable();
+            Plugin.RemoveTransferredItemFromChest(sourceChest, slot, itemId, moveAmount, inside);
         }
 
         private static bool HasActiveBulkDistributionPlan(Chest sourceChest, int itemId, List<ConveyorHelper.OutputDestination> filterDestinations)
