@@ -4904,7 +4904,10 @@ namespace Autom8er
                     continue;
 
                 FilterCrateHelper.MarkRouteActive(networkDestination.routeX, networkDestination.routeY, inside);
-                int moveAmount = Mathf.Min(GetTransferChunkSize(chest, itemId, stackAmount), stackAmount);
+                bool isDurabilityTransfer = IsDurabilityTransferItem(itemId);
+                int moveAmount = isDurabilityTransfer
+                    ? stackAmount
+                    : Mathf.Min(GetTransferChunkSize(chest, itemId, stackAmount), stackAmount);
                 int sourceSlot = slot;
                 int capturedItemId = itemId;
                 int capturedMoveAmount = moveAmount;
@@ -4913,7 +4916,7 @@ namespace Autom8er
                 int capturedRouteX = networkDestination.routeX;
                 int capturedRouteY = networkDestination.routeY;
 
-                int remaining = stackAmount - moveAmount;
+                int remaining = isDurabilityTransfer ? 0 : stackAmount - moveAmount;
                 if (remaining > 0)
                 {
                     ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, sourceSlot, itemId, remaining, inside);
@@ -4951,6 +4954,15 @@ namespace Autom8er
                 TriggerVacuumVisual(chest.xPos, chest.yPos, GetVacuumFlushDelay() + 0.2f);
                 return;
             }
+        }
+
+        private static bool IsDurabilityTransferItem(int itemId)
+        {
+            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            return item != null && item.hasFuel && !item.checkIfStackable();
         }
 
         public static void TryProcessFarmTile(Chest chest, HouseDetails inside)
