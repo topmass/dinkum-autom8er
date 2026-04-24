@@ -554,6 +554,7 @@ Same architecture as fish ponds but:
 - Live drip-fed traffic from machines and other changing sources still uses the simpler round-robin pull behavior
 - The black crate never pulls back out of its own touching destination chest
 - Durability items in a black crate are filter keys only. Their durability value is preserved and not normalized
+- Non-stackable fuel/durability items transfer as a whole slot amount through the shared transfer helpers, so green-crate exports and black-crate pulls preserve durability instead of chunking them as normal stackable items
 
 ### Vacuum Crates
 - `Green Wooden Crate` keeps a `21 x 21` harvest area and a `25 x 25` pickup area
