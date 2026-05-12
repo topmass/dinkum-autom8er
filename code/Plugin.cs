@@ -32,6 +32,7 @@ namespace Autom8er
         private ConfigEntry<bool> configAnimationEnabled;
         private ConfigEntry<float> configAnimationSpeed;
         private ConfigEntry<bool> configStackableCritters;
+        private ConfigEntry<bool> configShowHeldRangeGuidesForVanillaObjects;
 
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
@@ -64,6 +65,7 @@ namespace Autom8er
         public static bool AnimationEnabled = true;
         public static float AnimationSpeed = 2f;
         public static bool StackableCritters = true;
+        public static bool ShowHeldRangeGuidesForVanillaObjects = false;
         internal const int ACTIVE_FARMER_CRATES_PER_STEP = 4;
         internal const int FARMER_ACTIONS_PER_STEP = 2;
         internal const float FARMER_STEP_DELAY_SECONDS = 0.1f;
@@ -251,6 +253,15 @@ namespace Autom8er
                 "Disable to keep vanilla critter stacking behavior (1 per slot)."
             );
 
+            configShowHeldRangeGuidesForVanillaObjects = Config.Bind(
+                "Range Guides",
+                "ShowHeldRangeGuidesForVanillaObjects",
+                false,
+                "When enabled, holding vanilla range-aware placeables shows their range before placement.\n" +
+                "Includes windmills, solar panels, water tanks, silos, sprinklers, scarecrows, Auto Sorters, and advanced storage tables.\n" +
+                "Green Auto Farmer crates always show their range guide regardless of this setting."
+            );
+
             ConveyorTileItemId = configConveyorTileItemId.Value;
             KeepOneItem = configKeepOneItem.Value;
             ScanInterval = Mathf.Clamp(configScanInterval.Value, 0.1f, 1.0f);
@@ -260,8 +271,9 @@ namespace Autom8er
             AnimationEnabled = configAnimationEnabled.Value;
             AnimationSpeed = Mathf.Clamp(configAnimationSpeed.Value, 0.5f, 10f);
             StackableCritters = configStackableCritters.Value;
+            ShowHeldRangeGuidesForVanillaObjects = configShowHeldRangeGuidesForVanillaObjects.Value;
 
-            Log.LogInfo("Autom8er v1.7.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
+            Log.LogInfo("Autom8er v1.7.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", HeldRangeGuides=" + ShowHeldRangeGuidesForVanillaObjects);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -619,6 +631,8 @@ namespace Autom8er
         private static bool placedGuideActive = false;
         private static int heldGuideX = int.MinValue;
         private static int heldGuideY = int.MinValue;
+        private static int heldGuideTileObjectId = -1;
+        private static int heldGuideRangeTiles = -1;
         private static int placedGuideX = int.MinValue;
         private static int placedGuideY = int.MinValue;
         private static bool suppressHeldGuideUntilReleased = false;
@@ -634,11 +648,12 @@ namespace Autom8er
             }
 
             CharMovement localChar = NetworkMapSharer.Instance.localChar;
-            bool holdingGreenCrate = IsHoldingGreenCrate(localChar);
-            if (!holdingGreenCrate)
+            HeldRangeGuideTarget heldTarget;
+            bool hasHeldTarget = TryGetHeldRangeGuideTarget(localChar, out heldTarget);
+            if (!hasHeldTarget)
                 suppressHeldGuideUntilReleased = false;
 
-            if (localChar.myInteract == null || localChar.myInteract.InsideHouseDetails != null || !holdingGreenCrate || suppressHeldGuideUntilReleased)
+            if (localChar.myInteract == null || localChar.myInteract.InsideHouseDetails != null || !hasHeldTarget || suppressHeldGuideUntilReleased)
             {
                 ClearHeldGuide();
                 return;
@@ -659,12 +674,17 @@ namespace Autom8er
             }
 
             if (heldGuideActive && heldGuideX == xPos && heldGuideY == yPos)
-                return;
+            {
+                if (heldGuideTileObjectId == heldTarget.TileObjectId && heldGuideRangeTiles == heldTarget.RangeTiles)
+                    return;
+            }
 
-            ShowGuideAt(xPos, yPos);
+            ShowGuideAt(xPos, yPos, heldTarget.RangeTiles, heldTarget.TileObjectId);
             heldGuideActive = true;
             heldGuideX = xPos;
             heldGuideY = yPos;
+            heldGuideTileObjectId = heldTarget.TileObjectId;
+            heldGuideRangeTiles = heldTarget.RangeTiles;
         }
 
         public static bool TryHandleTapeUse(TapeMeasureManager manager)
@@ -694,7 +714,7 @@ namespace Autom8er
             }
 
             manager.clearTapeMeasure();
-            ShowGuideAt(xPos, yPos);
+            ShowGuideAt(xPos, yPos, Plugin.AUTO_FARMER_RANGE_TILES, Plugin.GREEN_CRATE_TILE_ID);
             heldGuideActive = false;
             placedGuideActive = true;
             placedGuideX = xPos;
@@ -713,8 +733,11 @@ namespace Autom8er
             localChar.myInteract.RefreshTileSelection(xPos, yPos);
         }
 
-        public static void NotifyGreenCratePlaced()
+        public static void NotifyRangeObjectPlaced(int tileObjectId)
         {
+            if (tileObjectId != Plugin.GREEN_CRATE_TILE_ID && (!heldGuideActive || tileObjectId != heldGuideTileObjectId))
+                return;
+
             suppressHeldGuideUntilReleased = true;
             ClearAll();
         }
@@ -725,6 +748,8 @@ namespace Autom8er
             placedGuideActive = false;
             heldGuideX = int.MinValue;
             heldGuideY = int.MinValue;
+            heldGuideTileObjectId = -1;
+            heldGuideRangeTiles = -1;
             placedGuideX = int.MinValue;
             placedGuideY = int.MinValue;
 
@@ -740,18 +765,39 @@ namespace Autom8er
             heldGuideActive = false;
             heldGuideX = int.MinValue;
             heldGuideY = int.MinValue;
+            heldGuideTileObjectId = -1;
+            heldGuideRangeTiles = -1;
 
             if (TapeMeasureManager.manage != null)
                 TapeMeasureManager.manage.clearTapeMeasure();
         }
 
-        private static bool IsHoldingGreenCrate(CharMovement localChar)
+        private static bool TryGetHeldRangeGuideTarget(CharMovement localChar, out HeldRangeGuideTarget target)
         {
+            target = new HeldRangeGuideTarget();
             if (localChar == null || localChar.myEquip == null || localChar.myEquip.itemCurrentlyHolding == null)
                 return false;
 
             InventoryItem item = localChar.myEquip.itemCurrentlyHolding;
-            return item.placeable != null && item.placeable.tileObjectId == Plugin.GREEN_CRATE_TILE_ID;
+            if (item.placeable == null)
+                return false;
+
+            int tileObjectId = item.placeable.tileObjectId;
+            if (tileObjectId == Plugin.GREEN_CRATE_TILE_ID)
+            {
+                target = new HeldRangeGuideTarget(tileObjectId, Plugin.AUTO_FARMER_RANGE_TILES);
+                return true;
+            }
+
+            if (!Plugin.ShowHeldRangeGuidesForVanillaObjects)
+                return false;
+
+            int rangeTiles;
+            if (!TryGetVanillaRangeTiles(item.placeable, out rangeTiles))
+                return false;
+
+            target = new HeldRangeGuideTarget(tileObjectId, rangeTiles);
+            return true;
         }
 
         private static bool IsInMap(int xPos, int yPos)
@@ -764,14 +810,14 @@ namespace Autom8er
                 yPos < WorldManager.Instance.onTileMap.GetLength(1);
         }
 
-        private static void ShowGuideAt(int xPos, int yPos)
+        private static void ShowGuideAt(int xPos, int yPos, int rangeTiles, int tileObjectId)
         {
             if (TapeMeasureManager.manage == null)
                 return;
 
             ResetTapeMeasureDrawCache(TapeMeasureManager.manage);
             Vector3 tileObjectPosition = new Vector3(xPos * 2f, 0f, yPos * 2f);
-            TapeMeasureManager.manage.ShowTileObjectDistance(tileObjectPosition, Plugin.AUTO_FARMER_RANGE_TILES, Plugin.GREEN_CRATE_TILE_ID);
+            TapeMeasureManager.manage.ShowTileObjectDistance(tileObjectPosition, rangeTiles, tileObjectId);
         }
 
         private static void ResetTapeMeasureDrawCache(TapeMeasureManager manager)
@@ -865,6 +911,68 @@ namespace Autom8er
         {
             return IsInMap(xPos, yPos) && WorldManager.Instance.onTileMap[xPos, yPos] == Plugin.GREEN_CRATE_TILE_ID;
         }
+
+        private static bool TryGetVanillaRangeTiles(TileObject placeable, out int rangeTiles)
+        {
+            rangeTiles = 0;
+            switch (placeable.tileObjectId)
+            {
+                case 16:
+                    rangeTiles = 14;
+                    return true;
+                case 703:
+                case 302:
+                    rangeTiles = 8;
+                    return true;
+                case 125:
+                case 852:
+                    rangeTiles = 10;
+                    return true;
+                case 36:
+                case 773:
+                    rangeTiles = 5;
+                    return true;
+            }
+
+            if (IsScarecrowTileObject(placeable.tileObjectId))
+            {
+                rangeTiles = 5;
+                return true;
+            }
+
+            if (placeable.sprinklerTile == null)
+                return false;
+
+            rangeTiles = Mathf.Max(placeable.sprinklerTile.horizontalSize, placeable.sprinklerTile.verticlSize);
+            return rangeTiles > 0;
+        }
+
+        private static bool IsScarecrowTileObject(int tileObjectId)
+        {
+            if (TownManager.manage == null || TownManager.manage.allScarecrowObjects == null)
+                return false;
+
+            for (int i = 0; i < TownManager.manage.allScarecrowObjects.Length; i++)
+            {
+                TileObject scarecrow = TownManager.manage.allScarecrowObjects[i];
+                if (scarecrow != null && scarecrow.tileObjectId == tileObjectId)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private struct HeldRangeGuideTarget
+        {
+            public readonly int TileObjectId;
+            public readonly int RangeTiles;
+
+            public HeldRangeGuideTarget(int tileObjectId, int rangeTiles)
+            {
+                TileObjectId = tileObjectId;
+                RangeTiles = rangeTiles;
+            }
+        }
     }
 
     [HarmonyPatch(typeof(TapeMeasureManager), "useTapeMeasure")]
@@ -881,8 +989,7 @@ namespace Autom8er
     {
         public static void Prefix(int newOnTile)
         {
-            if (newOnTile == Plugin.GREEN_CRATE_TILE_ID)
-                AutoFarmerRangeGuide.NotifyGreenCratePlaced();
+            AutoFarmerRangeGuide.NotifyRangeObjectPlaced(newOnTile);
         }
     }
 
