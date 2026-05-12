@@ -27,12 +27,30 @@
 16. **Green Crates = VacuFarm Crates** - Green crates harvest/vacuum nearby farm outputs, can till/fertilize/plant, and pass outputs into the connected network
 17. **Black Crates = Filter Crates** - Black crates hold sample items and route matching network items into a touching storage chest or green VacuFarm crate
 18. **Unlimited Shop Stall Rebuy** - Real shop stall stock stays buyable after purchase instead of marking sold out for the day
+19. **Green Crate Range Guide** - Holding a green crate previews its `21 x 21` farm range, and Tape Measure toggles that same range guide on placed green crates
 
 ### Large Array Defaults
 - Shared Auto Farmer pacing defaults: `4` active farmer crates per step, `2` farm actions or harvest tiles per active crate, `0.1s` realtime pause between day-change harvest steps
 - Daytime green-crate scheduler: active farmer crates target `0.45s`, plain green vacuum crates target `0.45s` when active and `10s` when idle
 - Daytime black-crate scheduler: interacting crates run at normal scan cadence, active crates target `0.45s`, idle crates target `8s`
 - Large manual chest dumps into filter networks can temporarily switch from simple round-robin to quota-style equalization, but live drip-fed machine traffic stays on normal round-robin
+
+### Central Performance Contract For Future Automation
+Anything added to filters, Auto Farmers, belts, harvesters, or item-routing systems must reuse the existing pacing model instead of creating a new burst loop.
+
+Rules:
+1. Do not process every special crate every `ScanInterval`. Green crates and black crates must stay on the existing active/idle round-robin schedulers.
+2. New green-crate behavior should wake the crate only when there is immediate work, recently routed activity, or player interaction. Idle systems must stay slow.
+3. New black-crate behavior should wake through `FilterCrateHelper.MarkRouteActive(...)` or player interaction, not by lowering idle polling for every filter crate.
+4. Prefer one grouped transfer per scheduled pass. Do not enqueue one animation, deposit callback, or conveyor transfer per individual item when a stack/group can represent the same result.
+5. Large harvest or logging-style systems must batch their actual work, not just their visuals. Use coarse waves, per-step limits, and realtime waits like the day-change Auto Farmer path.
+6. Green crates must keep Auto Farmer inputs locally: hoes, shovels, fertilizer, crop seeds, and valid tree-planting items should not be flushed as generic outputs.
+7. Green crates are not generic storage destinations. Generic machine output, harvest output, and fallback destination searches must continue to skip green crates unless a black filter route explicitly targets one.
+8. Filter crates are routing heads, not storage. Keep sample items in the black crate and move real bulk into the touching destination chest or explicitly routed green crate.
+9. Round-robin splitters must collect the full matching destination group, sort it into a stable order, and use the shared cursor. Do not create feature-local splitter state unless it is temporary and cleared on save/load.
+10. Temporary equalization is only for large stackable manual dumps from normal source chests. Live drip-fed machine traffic should stay on normal round-robin.
+11. If a new feature can create many item events, make the event producer respect the same scheduler and chunking rules before animation spawn. Do not add per-frame visual culling to hide overload after creating it.
+12. Any new runtime caches, cursors, reservations, or quota plans must be cleared in the save/load cleanup path if stale state could affect a later session.
 
 ### Green Crate Tree Mode
 - If a green crate contains a shovel and buried tree/fruit items, tree planting uses a dedicated layout pass that is separate from crop tilling/fertilizing/seed planting.
@@ -111,8 +129,8 @@ Autom8er namespace
 │   │          BLAST_FURNACE_TILE_ID (581), shared farmer pacing defaults,
 │   │          active/idle scheduler intervals and per-pass caps
 │   ├── Awake() - Init config, apply Harmony patches
-│   ├── Update() - ConveyorAnimator.UpdateAnimations() + scan timer + ProcessAllChests
-│   ├── OnDestroy() - ConveyorAnimator.ClearAllAnimations() + harmony.UnpatchSelf()
+│   ├── Update() - AutoFarmerRangeGuide.Update() + ConveyorAnimator.UpdateAnimations() + scan timer + ProcessAllChests
+│   ├── OnDestroy() - AutoFarmerRangeGuide.ClearAll() + ConveyorAnimator.ClearAllAnimations() + harmony.UnpatchSelf()
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
 │   ├── ApplyStackableCritters() - One-time: sets isStackable=true on all underwaterCreature items
 │   ├── ProcessAllChests() - Main loop
@@ -137,6 +155,22 @@ Autom8er namespace
 ├── ShopBuyDropUnlimitedStockPatch [HarmonyPatch]
 │   └── Prefix on ShopBuyDrop.sold(bool)
 │       - Skips sold-out behavior for real shop stalls so tools/seeds stay rebuyable
+│
+├── AutoFarmerRangeGuide (static class)
+│   ├── Update() - While holding a green crate, draws the effective `21 x 21` farm range on the selected tile
+│   ├── TryHandleTapeUse() - Tape Measure on a placed green crate toggles that crate's range guide on/off
+│   ├── NotifyGreenCratePlaced() - Clears the held placement guide after placing the green crate
+│   ├── ClearAll() - Clears held and placed guide state plus the active tape measure squares
+│   └── ShowGuideAt() - Uses TapeMeasureManager.ShowTileObjectDistance(..., 10, GREEN_CRATE_TILE_ID)
+│       - Must reset TapeMeasureManager private `_isFirstDraw` before drawing so on/off/on on the same crate recreates cleared squares
+│
+├── TapeMeasureAutoFarmerRangePatch [HarmonyPatch]
+│   └── Prefix on TapeMeasureManager.useTapeMeasure()
+│       - Lets green crates use Autom8er's range toggle, otherwise vanilla tape behavior continues
+│
+├── AutoFarmerRangeGuidePlacementPatch [HarmonyPatch]
+│   └── Prefix on CharInteract.ChangeTile()
+│       - Clears the held guide when a green crate is placed
 │
 ├── QuarryServerDropCapturePatch / QuarryDirectedServerDropCapturePatch [HarmonyPatch]
 │   └── Prefix on both NetworkMapSharer.spawnAServerDrop overloads
@@ -528,16 +562,17 @@ Same architecture as fish ponds but:
 1. Start from machine/chest position (multi-tile: scan all object tiles)
 2. Check adjacent tiles for conveyor tile type
 3. Add matching tiles to queue, track visited in `HashSet<long>`
-4. Limit to 50-500 steps depending on context
+4. Traverse the connected conveyor network until the queue is exhausted. Do not add arbitrary step caps for large-array paths.
 5. At each conveyor tile, check adjacent positions for targets
 6. Phase 2: if destination not found at distance 1, check distance 2 from all visited conveyors
 7. For crab pots/fish ponds: extended radius at each conveyor tile
 8. For chests in `FindChestViaConveyorPath`: check ADJACENT to conveyor tiles (not ON them)
 
 ### Input-Only Logic
-- `IsInputOnlyContainer()` checks TileObject ID against WHITE_CRATE_TILE_ID (417) and WHITE_CHEST_TILE_ID (430)
+- `IsInputOnlyContainer()` checks TileObject ID against WHITE_CRATE_TILE_ID (417)
 - Called in output functions to skip white containers
-- White containers CAN still feed machines (not blocked in input functions)
+- White crates CAN still feed machines (not blocked in input functions)
+- White chests are standard chests and must not inherit crate-only behavior
 
 ### Filter Crates
 - `Black Wooden Crate` is no longer treated as a normal storage chest or legacy output-only crate
@@ -558,6 +593,11 @@ Same architecture as fish ponds but:
 
 ### Vacuum Crates
 - `Green Wooden Crate` keeps a `21 x 21` harvest area and a `25 x 25` pickup area
+- Holding a green crate draws its effective `21 x 21` farm range on the selected tile using the game's tape measure square renderer
+- Placing the green crate clears the held placement guide immediately so no stale range remains after placement
+- Using Tape Measure on a placed green crate toggles that crate's `21 x 21` farm range on and off
+- The placed guide must call `clearTapeMeasure()` before showing a new crate guide, then reset `_isFirstDraw` before `ShowTileObjectDistance(...)`
+- Without resetting `_isFirstDraw`, toggling the same crate on, off, then on again can skip redraw because the vanilla tape measure cache still remembers the same bounds after its squares were destroyed
 - Green crates split into two daytime roles:
   - tool-equipped farmer crates use the farmer scheduler and do farm work, not generic loose-drop vacuum sweeps
   - plain green crates remain loose-drop vacuum collectors, but use a much slower idle cadence
@@ -826,7 +866,7 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
-- **1.7.0** - Green Auto Farmer crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated Auto Farmer day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green Auto Farmer crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Large manual stack dumps from normal chests can temporarily use a stricter equalization plan across matching filters before falling back to round-robin. Daytime crate processing now uses active/idle schedulers so plain green vacuum crates, tool-equipped farmer crates, interacting black crates, active black crates, and idle black crates do not all poll at the same rate. Auto Farmer day-change harvesting is now wave-based for large fields: 4 crates work at once, each crate breaks 2 tiles per step with a 0.1s realtime pause, keeps its gathered items locally until that crate finishes, then starts dumping to the network. Fruit-tree farmers follow that same pacing while keeping their dedicated northwest-first quadrant targeting. Green-crate exports on multi-green-crate networks now use larger `100`-item chunks for stackable harvest output once the local held stack is at least `100`, reducing belt clutter on big farms while keeping the normal `10`-item tail behavior. Harvest target ordering expands outward from the crate in square rings so the break pattern looks cleaner around the green crate. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not Auto Farmer-owned, and now process in 100-machine / 0.2s waves to smooth heavy honey days. Shop stall stock is also patched to stay rebuyable instead of marking sold out after one purchase. Day-change systems use kickoff delays only, not full completion waits. Non-stackable fuel/durability items transfer as whole slot amounts through shared helpers so green-crate exports and black-crate pulls preserve durability.
+- **1.7.0** - Green Auto Farmer crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated Auto Farmer day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green Auto Farmer crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Large manual stack dumps from normal chests can temporarily use a stricter equalization plan across matching filters before falling back to round-robin. Daytime crate processing now uses active/idle schedulers so plain green vacuum crates, tool-equipped farmer crates, interacting black crates, active black crates, and idle black crates do not all poll at the same rate. Auto Farmer day-change harvesting is now wave-based for large fields: 4 crates work at once, each crate breaks 2 tiles per step with a 0.1s realtime pause, keeps its gathered items locally until that crate finishes, then starts dumping to the network. Fruit-tree farmers follow that same pacing while keeping their dedicated northwest-first quadrant targeting. Green-crate exports on multi-green-crate networks now use larger `100`-item chunks for stackable harvest output once the local held stack is at least `100`, reducing belt clutter on big farms while keeping the normal `10`-item tail behavior. Harvest target ordering expands outward from the crate in square rings so the break pattern looks cleaner around the green crate. Holding a green crate now previews its effective `21 x 21` farm range, and Tape Measure toggles that same range on placed green crates. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not Auto Farmer-owned, and now process in 100-machine / 0.2s waves to smooth heavy honey days. Shop stall stock is also patched to stay rebuyable instead of marking sold out after one purchase. Day-change systems use kickoff delays only, not full completion waits. Non-stackable fuel/durability items transfer as whole slot amounts through shared helpers so green-crate exports and black-crate pulls preserve durability.
 - **1.6.1** - Fixed load-in catch-up processing so existing day-change outputs now run after loading into a save once the world, player, and chests are ready. Added fixed 1 second phasing between day-change harvest systems, quarry mining credit, and a subtle conveyor animation polish so items travel 30% into the destination tile before vanishing.
 - **1.5.2** - Large single-chest day-change arrays now scan through the full connected harvest network with no arbitrary connected-array/path scan cutoffs. Day-change conveyor launches are staggered in 100-item / 0.2s batches per destination chest so 1000+ machine arrays stay visual while reducing the launch spike.
 - **1.5.1** - Fixed player credit across all automation paths. Automated machine outputs now properly count for player progression when deposited into storage. Bee houses, key cutters, worm farms, crab pots, fish ponds, and bug terrariums also grant proper automation credit. Improved stability for large machine arrays.
