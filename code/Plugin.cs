@@ -32,7 +32,6 @@ namespace Autom8er
         private ConfigEntry<bool> configAnimationEnabled;
         private ConfigEntry<float> configAnimationSpeed;
         private ConfigEntry<bool> configStackableCritters;
-        private ConfigEntry<bool> configShowHeldRangeGuidesForVanillaObjects;
 
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
@@ -65,7 +64,6 @@ namespace Autom8er
         public static bool AnimationEnabled = true;
         public static float AnimationSpeed = 2f;
         public static bool StackableCritters = true;
-        public static bool ShowHeldRangeGuidesForVanillaObjects = false;
         internal const int ACTIVE_FARMER_CRATES_PER_STEP = 4;
         internal const int FARMER_ACTIONS_PER_STEP = 2;
         internal const float FARMER_STEP_DELAY_SECONDS = 0.1f;
@@ -253,15 +251,6 @@ namespace Autom8er
                 "Disable to keep vanilla critter stacking behavior (1 per slot)."
             );
 
-            configShowHeldRangeGuidesForVanillaObjects = Config.Bind(
-                "Range Guides",
-                "ShowHeldRangeGuidesForVanillaObjects",
-                false,
-                "When enabled, holding vanilla range-aware placeables shows their range before placement.\n" +
-                "Includes windmills, solar panels, water tanks, silos, sprinklers, scarecrows, Auto Sorters, and advanced storage tables.\n" +
-                "Green Auto Farmer crates always show their range guide regardless of this setting."
-            );
-
             ConveyorTileItemId = configConveyorTileItemId.Value;
             KeepOneItem = configKeepOneItem.Value;
             ScanInterval = Mathf.Clamp(configScanInterval.Value, 0.1f, 1.0f);
@@ -271,9 +260,8 @@ namespace Autom8er
             AnimationEnabled = configAnimationEnabled.Value;
             AnimationSpeed = Mathf.Clamp(configAnimationSpeed.Value, 0.5f, 10f);
             StackableCritters = configStackableCritters.Value;
-            ShowHeldRangeGuidesForVanillaObjects = configShowHeldRangeGuidesForVanillaObjects.Value;
 
-            Log.LogInfo("Autom8er v1.7.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", HeldRangeGuides=" + ShowHeldRangeGuidesForVanillaObjects);
+            Log.LogInfo("Autom8er v1.7.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -628,14 +616,9 @@ namespace Autom8er
     public static class AutoFarmerRangeGuide
     {
         private static bool heldGuideActive = false;
-        private static bool placedGuideActive = false;
         private static int heldGuideX = int.MinValue;
         private static int heldGuideY = int.MinValue;
-        private static int heldGuideTileObjectId = -1;
-        private static int heldGuideRangeTiles = -1;
-        private static int placedGuideX = int.MinValue;
-        private static int placedGuideY = int.MinValue;
-        private static int placedGuideTileObjectId = -1;
+        private static bool activeGuidePinned = false;
         private static bool suppressHeldGuideUntilReleased = false;
         private static readonly FieldInfo objectAttackingField = AccessTools.Field(typeof(CharInteract), "_objectAttacking");
         private static readonly FieldInfo tapeMeasureFirstDrawField = AccessTools.Field(typeof(TapeMeasureManager), "_isFirstDraw");
@@ -649,14 +632,14 @@ namespace Autom8er
             }
 
             CharMovement localChar = NetworkMapSharer.Instance.localChar;
-            HeldRangeGuideTarget heldTarget;
-            bool hasHeldTarget = TryGetHeldRangeGuideTarget(localChar, out heldTarget);
+            bool hasHeldTarget = IsHoldingGreenCrate(localChar);
             if (!hasHeldTarget)
                 suppressHeldGuideUntilReleased = false;
 
             if (localChar.myInteract == null || localChar.myInteract.InsideHouseDetails != null || !hasHeldTarget || suppressHeldGuideUntilReleased)
             {
-                ClearHeldGuide();
+                if (!activeGuidePinned)
+                    ClearHeldGuide();
                 return;
             }
 
@@ -668,28 +651,21 @@ namespace Autom8er
                 return;
             }
 
-            if (placedGuideActive)
-            {
-                placedGuideActive = false;
-                TapeMeasureManager.manage.clearTapeMeasure();
-            }
-
             if (heldGuideActive && heldGuideX == xPos && heldGuideY == yPos)
-            {
-                if (heldGuideTileObjectId == heldTarget.TileObjectId && heldGuideRangeTiles == heldTarget.RangeTiles)
-                    return;
-            }
+                return;
 
-            ShowGuideAt(xPos, yPos, heldTarget.RangeTiles, heldTarget.TileObjectId);
+            ShowGuideAt(xPos, yPos);
             heldGuideActive = true;
             heldGuideX = xPos;
             heldGuideY = yPos;
-            heldGuideTileObjectId = heldTarget.TileObjectId;
-            heldGuideRangeTiles = heldTarget.RangeTiles;
+            activeGuidePinned = false;
         }
 
         public static bool TryHandleTapeUse(TapeMeasureManager manager)
         {
+            if (IsRangeReviewInstalled())
+                return false;
+
             if (manager == null || WorldManager.Instance == null || NetworkMapSharer.Instance == null || NetworkMapSharer.Instance.localChar == null)
                 return false;
 
@@ -697,64 +673,77 @@ namespace Autom8er
             if (localChar.myInteract == null || localChar.myInteract.InsideHouseDetails != null || manager.isCurrentlyMeasuring())
                 return false;
 
-            RefreshCurrentSelectionIfRangeObject(localChar);
+            RefreshCurrentSelectionIfGreenCrate(localChar);
 
-            PlacedRangeGuideTarget target;
-            if (!TryResolvePlacedRangeGuideTarget(localChar, out target))
+            int xPos;
+            int yPos;
+            if (!TryResolveGreenCrateTarget(localChar, out xPos, out yPos))
             {
-                if (heldGuideActive || placedGuideActive)
-                    ClearAll();
+                if (heldGuideActive)
+                    ClearActiveGuide();
                 return false;
             }
 
-            if (placedGuideActive && placedGuideX == target.X && placedGuideY == target.Y && placedGuideTileObjectId == target.TileObjectId)
+            if (activeGuidePinned && heldGuideActive && heldGuideX == xPos && heldGuideY == yPos)
             {
-                ClearAll();
+                ClearActiveGuide();
                 return true;
             }
 
-            manager.clearTapeMeasure();
-            ShowGuideAt(target.X, target.Y, target.RangeTiles, target.TileObjectId);
-            heldGuideActive = false;
-            placedGuideActive = true;
-            placedGuideX = target.X;
-            placedGuideY = target.Y;
-            placedGuideTileObjectId = target.TileObjectId;
+            ShowGuideAt(xPos, yPos);
+            heldGuideActive = true;
+            heldGuideX = xPos;
+            heldGuideY = yPos;
+            activeGuidePinned = true;
             return true;
         }
 
-        private static void RefreshCurrentSelectionIfRangeObject(CharMovement localChar)
+        private static bool IsRangeReviewInstalled()
+        {
+            Assembly[] assemblies = System.AppDomain.CurrentDomain.GetAssemblies();
+            for (int i = 0; i < assemblies.Length; i++)
+            {
+                AssemblyName name = assemblies[i].GetName();
+                if (name != null && name.Name == "topmass.rangereview")
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static void RefreshCurrentSelectionIfGreenCrate(CharMovement localChar)
         {
             int xPos = Mathf.RoundToInt((localChar.transform.position.x + localChar.transform.forward.x * 2f) / 2f);
             int yPos = Mathf.RoundToInt((localChar.transform.position.z + localChar.transform.forward.z * 2f) / 2f);
 
-            PlacedRangeGuideTarget target;
-            if (!TryGetPlacedRangeGuideTargetAt(xPos, yPos, out target))
+            int rootX;
+            int rootY;
+            if (!TryGetGreenCrateAt(xPos, yPos, out rootX, out rootY))
                 return;
 
-            localChar.myInteract.RefreshTileSelection(target.X, target.Y);
+            localChar.myInteract.RefreshTileSelection(rootX, rootY);
         }
 
-        public static void NotifyRangeObjectPlaced(int tileObjectId)
+        public static void NotifyGreenCratePlaced(int tileObjectId)
         {
-            if (tileObjectId != Plugin.GREEN_CRATE_TILE_ID && (!heldGuideActive || tileObjectId != heldGuideTileObjectId))
+            if (tileObjectId != Plugin.GREEN_CRATE_TILE_ID)
                 return;
 
             suppressHeldGuideUntilReleased = true;
-            ClearAll();
+            ClearActiveGuide();
         }
 
         public static void ClearAll()
         {
+            ClearActiveGuide();
+        }
+
+        private static void ClearActiveGuide()
+        {
             heldGuideActive = false;
-            placedGuideActive = false;
             heldGuideX = int.MinValue;
             heldGuideY = int.MinValue;
-            heldGuideTileObjectId = -1;
-            heldGuideRangeTiles = -1;
-            placedGuideX = int.MinValue;
-            placedGuideY = int.MinValue;
-            placedGuideTileObjectId = -1;
+            activeGuidePinned = false;
 
             if (TapeMeasureManager.manage != null)
                 TapeMeasureManager.manage.clearTapeMeasure();
@@ -768,39 +757,18 @@ namespace Autom8er
             heldGuideActive = false;
             heldGuideX = int.MinValue;
             heldGuideY = int.MinValue;
-            heldGuideTileObjectId = -1;
-            heldGuideRangeTiles = -1;
 
             if (TapeMeasureManager.manage != null)
                 TapeMeasureManager.manage.clearTapeMeasure();
         }
 
-        private static bool TryGetHeldRangeGuideTarget(CharMovement localChar, out HeldRangeGuideTarget target)
+        private static bool IsHoldingGreenCrate(CharMovement localChar)
         {
-            target = new HeldRangeGuideTarget();
             if (localChar == null || localChar.myEquip == null || localChar.myEquip.itemCurrentlyHolding == null)
                 return false;
 
             InventoryItem item = localChar.myEquip.itemCurrentlyHolding;
-            if (item.placeable == null)
-                return false;
-
-            int tileObjectId = item.placeable.tileObjectId;
-            if (tileObjectId == Plugin.GREEN_CRATE_TILE_ID)
-            {
-                target = new HeldRangeGuideTarget(tileObjectId, Plugin.AUTO_FARMER_RANGE_TILES);
-                return true;
-            }
-
-            if (!Plugin.ShowHeldRangeGuidesForVanillaObjects)
-                return false;
-
-            int rangeTiles;
-            if (!TryGetVanillaRangeTiles(item.placeable, out rangeTiles))
-                return false;
-
-            target = new HeldRangeGuideTarget(tileObjectId, rangeTiles);
-            return true;
+            return item.placeable != null && item.placeable.tileObjectId == Plugin.GREEN_CRATE_TILE_ID;
         }
 
         private static bool IsInMap(int xPos, int yPos)
@@ -813,24 +781,14 @@ namespace Autom8er
                 yPos < WorldManager.Instance.onTileMap.GetLength(1);
         }
 
-        private static void ShowGuideAt(int xPos, int yPos, int rangeTiles, int tileObjectId)
+        private static void ShowGuideAt(int xPos, int yPos)
         {
             if (TapeMeasureManager.manage == null)
                 return;
 
             ResetTapeMeasureDrawCache(TapeMeasureManager.manage);
             Vector3 tileObjectPosition = new Vector3(xPos * 2f, 0f, yPos * 2f);
-            ShowTileObjectDistanceUnclamped(TapeMeasureManager.manage, tileObjectPosition, rangeTiles, tileObjectId);
-        }
-
-        private static void ShowTileObjectDistanceUnclamped(TapeMeasureManager manager, Vector3 tileObjectPosition, int rangeTiles, int tileObjectId)
-        {
-            TileObjectSettings settings = WorldManager.Instance.allObjectSettings[tileObjectId];
-            int xSize = settings.xSize;
-            int ySize = settings.ySize;
-            Vector3 startPos = new Vector3(tileObjectPosition.x - rangeTiles * 2f, tileObjectPosition.y, tileObjectPosition.z - rangeTiles * 2f);
-            Vector3 endPos = new Vector3(tileObjectPosition.x + (rangeTiles + xSize / 2f) * 2f, 0f, tileObjectPosition.z + (rangeTiles + ySize / 2f) * 2f);
-            manager.drawMessureSquares(startPos, endPos);
+            TapeMeasureManager.manage.ShowTileObjectDistance(tileObjectPosition, Plugin.AUTO_FARMER_RANGE_TILES, Plugin.GREEN_CRATE_TILE_ID);
         }
 
         private static void ResetTapeMeasureDrawCache(TapeMeasureManager manager)
@@ -839,50 +797,55 @@ namespace Autom8er
                 tapeMeasureFirstDrawField.SetValue(manager, true);
         }
 
-        private static bool TryResolvePlacedRangeGuideTarget(CharMovement localChar, out PlacedRangeGuideTarget target)
+        private static bool TryResolveGreenCrateTarget(CharMovement localChar, out int targetX, out int targetY)
         {
+            targetX = int.MinValue;
+            targetY = int.MinValue;
             int xPos = Mathf.RoundToInt(localChar.myInteract.selectedTile.x);
             int yPos = Mathf.RoundToInt(localChar.myInteract.selectedTile.y);
-            if (TryGetPlacedRangeGuideTargetAt(xPos, yPos, out target))
+            if (TryGetGreenCrateAt(xPos, yPos, out targetX, out targetY))
                 return true;
 
             if (localChar.myInteract.tileHighlighter != null)
             {
                 int highlighterX = Mathf.RoundToInt(localChar.myInteract.tileHighlighter.position.x / 2f);
                 int highlighterY = Mathf.RoundToInt(localChar.myInteract.tileHighlighter.position.z / 2f);
-                if (TryGetPlacedRangeGuideTargetAt(highlighterX, highlighterY, out target))
+                if (TryGetGreenCrateAt(highlighterX, highlighterY, out targetX, out targetY))
                     return true;
             }
 
             int forwardX = Mathf.RoundToInt((localChar.transform.position.x + localChar.transform.forward.x * 2f) / 2f);
             int forwardY = Mathf.RoundToInt((localChar.transform.position.z + localChar.transform.forward.z * 2f) / 2f);
-            if (TryGetPlacedRangeGuideTargetAt(forwardX, forwardY, out target))
+            if (TryGetGreenCrateAt(forwardX, forwardY, out targetX, out targetY))
                 return true;
 
             TileObject objectAttacking = GetObjectAttacking(localChar.myInteract);
-            if (objectAttacking != null && TryGetPlacedRangeGuideTargetAt(objectAttacking.xPos, objectAttacking.yPos, out target))
+            if (objectAttacking != null && TryGetGreenCrateAt(objectAttacking.xPos, objectAttacking.yPos, out targetX, out targetY))
                 return true;
 
             int attackX = Mathf.RoundToInt(localChar.myInteract.currentlyAttackingPos.x);
             int attackY = Mathf.RoundToInt(localChar.myInteract.currentlyAttackingPos.y);
-            if (TryGetPlacedRangeGuideTargetAt(attackX, attackY, out target))
+            if (TryGetGreenCrateAt(attackX, attackY, out targetX, out targetY))
                 return true;
 
-            PlacedRangeGuideTarget bestTarget = new PlacedRangeGuideTarget();
+            int bestX = int.MinValue;
+            int bestY = int.MinValue;
             int bestDistance = int.MaxValue;
             for (int y = yPos - 1; y <= yPos + 1; y++)
             {
                 for (int x = xPos - 1; x <= xPos + 1; x++)
                 {
-                    PlacedRangeGuideTarget nearbyTarget;
-                    if (!TryGetPlacedRangeGuideTargetAt(x, y, out nearbyTarget))
+                    int nearbyX;
+                    int nearbyY;
+                    if (!TryGetGreenCrateAt(x, y, out nearbyX, out nearbyY))
                         continue;
 
                     int distance = Mathf.Abs(x - xPos) + Mathf.Abs(y - yPos);
                     if (distance < bestDistance)
                     {
                         bestDistance = distance;
-                        bestTarget = nearbyTarget;
+                        bestX = nearbyX;
+                        bestY = nearbyY;
                     }
                 }
             }
@@ -890,38 +853,20 @@ namespace Autom8er
             if (bestDistance == int.MaxValue)
                 return false;
 
-            target = bestTarget;
+            targetX = bestX;
+            targetY = bestY;
             return true;
         }
 
-        private static bool TryGetPlacedRangeGuideTargetAt(int xPos, int yPos, out PlacedRangeGuideTarget target)
+        private static bool TryGetGreenCrateAt(int xPos, int yPos, out int rootX, out int rootY)
         {
-            target = new PlacedRangeGuideTarget();
-            int rootX;
-            int rootY;
+            rootX = xPos;
+            rootY = yPos;
             int tileObjectId;
             if (!TryGetRootTileObjectAt(xPos, yPos, out rootX, out rootY, out tileObjectId))
                 return false;
 
-            if (tileObjectId == Plugin.GREEN_CRATE_TILE_ID)
-            {
-                target = new PlacedRangeGuideTarget(rootX, rootY, tileObjectId, Plugin.AUTO_FARMER_RANGE_TILES);
-                return true;
-            }
-
-            if (!Plugin.ShowHeldRangeGuidesForVanillaObjects)
-                return false;
-
-            if (WorldManager.Instance.allObjects == null || tileObjectId < 0 || tileObjectId >= WorldManager.Instance.allObjects.Length)
-                return false;
-
-            TileObject placeable = WorldManager.Instance.allObjects[tileObjectId];
-            int rangeTiles;
-            if (placeable == null || !TryGetVanillaRangeTiles(placeable, out rangeTiles))
-                return false;
-
-            target = new PlacedRangeGuideTarget(rootX, rootY, tileObjectId, rangeTiles);
-            return true;
+            return tileObjectId == Plugin.GREEN_CRATE_TILE_ID;
         }
 
         private static bool TryGetRootTileObjectAt(int xPos, int yPos, out int rootX, out int rootY, out int tileObjectId)
@@ -954,84 +899,6 @@ namespace Autom8er
 
             return objectAttackingField.GetValue(interact) as TileObject;
         }
-
-        private static bool TryGetVanillaRangeTiles(TileObject placeable, out int rangeTiles)
-        {
-            rangeTiles = 0;
-            switch (placeable.tileObjectId)
-            {
-                case 16:
-                    rangeTiles = 14;
-                    return true;
-                case 703:
-                case 302:
-                    rangeTiles = 8;
-                    return true;
-                case 125:
-                case 852:
-                    rangeTiles = 10;
-                    return true;
-                case 36:
-                case 773:
-                    rangeTiles = 5;
-                    return true;
-            }
-
-            if (IsScarecrowTileObject(placeable.tileObjectId))
-            {
-                rangeTiles = 5;
-                return true;
-            }
-
-            if (placeable.sprinklerTile == null)
-                return false;
-
-            rangeTiles = Mathf.Max(placeable.sprinklerTile.horizontalSize, placeable.sprinklerTile.verticlSize);
-            return rangeTiles > 0;
-        }
-
-        private static bool IsScarecrowTileObject(int tileObjectId)
-        {
-            if (TownManager.manage == null || TownManager.manage.allScarecrowObjects == null)
-                return false;
-
-            for (int i = 0; i < TownManager.manage.allScarecrowObjects.Length; i++)
-            {
-                TileObject scarecrow = TownManager.manage.allScarecrowObjects[i];
-                if (scarecrow != null && scarecrow.tileObjectId == tileObjectId)
-                    return true;
-            }
-
-            return false;
-        }
-
-        private struct HeldRangeGuideTarget
-        {
-            public readonly int TileObjectId;
-            public readonly int RangeTiles;
-
-            public HeldRangeGuideTarget(int tileObjectId, int rangeTiles)
-            {
-                TileObjectId = tileObjectId;
-                RangeTiles = rangeTiles;
-            }
-        }
-
-        private struct PlacedRangeGuideTarget
-        {
-            public readonly int X;
-            public readonly int Y;
-            public readonly int TileObjectId;
-            public readonly int RangeTiles;
-
-            public PlacedRangeGuideTarget(int x, int y, int tileObjectId, int rangeTiles)
-            {
-                X = x;
-                Y = y;
-                TileObjectId = tileObjectId;
-                RangeTiles = rangeTiles;
-            }
-        }
     }
 
     [HarmonyPatch(typeof(TapeMeasureManager), "useTapeMeasure")]
@@ -1048,7 +915,7 @@ namespace Autom8er
     {
         public static void Prefix(int newOnTile)
         {
-            AutoFarmerRangeGuide.NotifyRangeObjectPlaced(newOnTile);
+            AutoFarmerRangeGuide.NotifyGreenCratePlaced(newOnTile);
         }
     }
 
