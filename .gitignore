@@ -5,7 +5,7 @@ codebase/obj/
 # IDE
 .vs/
 .vscode/
-.codex/
+.codex
 *.user
 *.suo
 
