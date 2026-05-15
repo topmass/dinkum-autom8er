@@ -455,6 +455,9 @@ namespace Autom8er
                     continue;
                 }
 
+                if (ConveyorHelper.IsPondOrTerrarium(chest.xPos, chest.yPos, inside))
+                    continue;
+
                 if (!ConveyorHelper.ChestHasItems(chest))
                     continue;
 
@@ -4099,6 +4102,16 @@ namespace Autom8er
             return GetTileObjectId(x, y, inside) == Plugin.GREEN_CRATE_TILE_ID;
         }
 
+        public static bool IsPondOrTerrarium(int x, int y, HouseDetails inside)
+        {
+            int tileObjectId = GetTileObjectId(x, y, inside);
+            if (tileObjectId < 0)
+                return false;
+
+            ChestPlaceable chestPlaceable = WorldManager.Instance.allObjects[tileObjectId].tileObjectChest;
+            return chestPlaceable != null && (chestPlaceable.isFishPond || chestPlaceable.isBugTerrarium);
+        }
+
         public static bool IsGenericAutomationRootContainer(int x, int y, HouseDetails inside)
         {
             if (IsInputOnlyContainer(x, y, inside) ||
@@ -4618,6 +4631,8 @@ namespace Autom8er
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
         private const int FERTILIZER_ITEM_ID = 275;
+        private const int SEASON_ALL_ITEM_ID = 1367;
+        private const int INSTA_GROW_ITEM_ID = 1671;
         private const int VACUUM_HARVEST_RADIUS_TILES = 10;
         private const int VACUUM_PICKUP_RADIUS_TILES = 12;
         private const int FARM_ACTIONS_PER_SCAN = Plugin.FARMER_ACTIONS_PER_STEP;
@@ -4905,7 +4920,16 @@ namespace Autom8er
                             }
 
                             EndHarvestCollection(state.chest);
-                            TryFlushStoredItemsToNetwork(state.chest, null);
+                            bool hasPendingFlush;
+                            bool didFlush = TryFlushStoredItemsToNetwork(state.chest, null, out hasPendingFlush);
+                            if (didFlush || hasPendingFlush)
+                            {
+                                state.readyToFlushAt = Time.time + (didFlush
+                                    ? Mathf.Max(DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS, Plugin.ScanInterval)
+                                    : VACUUM_STACK_BUFFER_SECONDS);
+                                continue;
+                            }
+
                             state.flushStarted = true;
                             continue;
                         }
@@ -5235,13 +5259,21 @@ namespace Autom8er
             return longestAnimation;
         }
 
-        public static void TryFlushStoredItemsToNetwork(Chest chest, HouseDetails inside)
+        public static bool TryFlushStoredItemsToNetwork(Chest chest, HouseDetails inside)
         {
+            bool hasPendingFlush;
+            return TryFlushStoredItemsToNetwork(chest, inside, out hasPendingFlush);
+        }
+
+        private static bool TryFlushStoredItemsToNetwork(Chest chest, HouseDetails inside, out bool hasPendingFlush)
+        {
+            hasPendingFlush = false;
+
             if (chest == null || inside != null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, inside))
-                return;
+                return false;
 
             if (IsHarvestCollecting(chest))
-                return;
+                return false;
 
             ConveyorHelper.EnsureAutomationChestsActive(chest);
 
@@ -5256,11 +5288,12 @@ namespace Autom8er
                 if (ShouldRetainForAutoFarmer(chest, itemId))
                     continue;
 
-                if (!ShouldFlushStackNow(chest, itemId, stackAmount))
-                    continue;
-
                 ConveyorHelper.OutputDestination networkDestination;
                 if (!ConveyorHelper.TryFindBestOutputDestinationFromNetworkAnchor(chest, inside, itemId, includeAnchorChest: false, excludeVacuumCrates: true, out networkDestination))
+                    continue;
+
+                hasPendingFlush = true;
+                if (!ShouldFlushStackNow(chest, itemId, stackAmount))
                     continue;
 
                 FilterCrateHelper.MarkRouteActive(networkDestination.routeX, networkDestination.routeY, inside);
@@ -5303,8 +5336,10 @@ namespace Autom8er
                     inside, depositToNetwork);
 
                 MarkCrateActive(chest);
-                return;
+                return true;
             }
+
+            return false;
         }
 
         public static void TryProcessFarmTile(Chest chest, HouseDetails inside)
@@ -5344,6 +5379,14 @@ namespace Autom8er
         private static bool TryProcessOneFarmAction(Chest chest)
         {
             bool hasHoeTool = HasHoeTool(chest);
+            int instaGrowSlot = FindItemSlot(chest, IsGrowthBoosterItem);
+            if (instaGrowSlot != -1 && TryFindBestFarmTile(chest, CanApplyInstaGrowTile, out FarmTileTarget growTarget))
+            {
+                ApplyInstaGrowAt(chest, instaGrowSlot, growTarget.xPos, growTarget.yPos);
+                MarkCrateActive(chest);
+                return true;
+            }
+
             int fertilizerSlot = FindItemSlot(chest, IsFertilizerItem);
             bool hasFertilizer = fertilizerSlot != -1;
 
@@ -5793,14 +5836,9 @@ namespace Autom8er
             return -1;
         }
 
-        private static bool IsFarmerManagedItem(int itemId)
-        {
-            return IsHoeToolItem(itemId) || IsShovelToolItem(itemId) || IsFertilizerItem(itemId) || IsCropSeedItem(itemId);
-        }
-
         private static bool ShouldRetainForAutoFarmer(Chest chest, int itemId)
         {
-            if (IsFarmerManagedItem(itemId))
+            if (IsHoeToolItem(itemId) || IsShovelToolItem(itemId) || IsFertilizerItem(itemId) || IsGrowthBoosterItem(itemId) || IsCropSeedItem(itemId))
                 return true;
 
             if (!IsTreePlantingItem(itemId) || chest == null || !HasShovelTool(chest))
@@ -5828,7 +5866,13 @@ namespace Autom8er
                 if (itemId < 0 || stackAmount <= 0)
                     continue;
 
-                if (hasHoeTool && (IsFertilizerItem(itemId) || IsCropSeedItem(itemId)))
+                if (hasHoeTool && IsFertilizerItem(itemId) && TryFindBestFarmTile(chest, CanFertilizeTile, out FarmTileTarget _))
+                    return true;
+
+                if (IsGrowthBoosterItem(itemId) && TryFindBestFarmTile(chest, CanApplyInstaGrowTile, out FarmTileTarget _))
+                    return true;
+
+                if (hasHoeTool && IsCropSeedItem(itemId))
                     return true;
 
                 if (hasShovelTool && IsTreePlantingItem(itemId) && ShouldRetainForAutoFarmer(chest, itemId))
@@ -5858,7 +5902,12 @@ namespace Autom8er
 
         private static bool IsFertilizerItem(int itemId)
         {
-            return itemId == FERTILIZER_ITEM_ID;
+            return itemId == FERTILIZER_ITEM_ID || itemId == SEASON_ALL_ITEM_ID;
+        }
+
+        private static bool IsGrowthBoosterItem(int itemId)
+        {
+            return itemId == INSTA_GROW_ITEM_ID;
         }
 
         private static bool IsHoeToolItem(int itemId)
@@ -6155,6 +6204,22 @@ namespace Autom8er
             return settings != null && settings.isGrass;
         }
 
+        private static bool CanApplyInstaGrowTile(int xPos, int yPos)
+        {
+            if (!IsOutdoorFarmTileInRange(xPos, yPos))
+                return false;
+
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            if (tileObjectId < 0 || tileObjectId >= WorldManager.Instance.allObjects.Length)
+                return false;
+
+            TileObjectGrowthStages growth = WorldManager.Instance.allObjects[tileObjectId].tileObjectGrowthStages;
+            if (growth == null || !growth.needsTilledSoil || growth.objectStages == null || growth.objectStages.Length == 0)
+                return false;
+
+            return WorldManager.Instance.onTileStatusMap[xPos, yPos] < growth.objectStages.Length - 1;
+        }
+
         private static bool IsOutdoorFarmTileInRange(int xPos, int yPos, bool ignoreReservation = false)
         {
             if (WorldManager.Instance == null || NetworkMapSharer.Instance == null)
@@ -6199,7 +6264,10 @@ namespace Autom8er
 
         private static void ApplyFertilizerAt(Chest chest, int slot, int xPos, int yPos)
         {
-            InventoryItem fertilizer = Inventory.Instance.allItems[FERTILIZER_ITEM_ID];
+            int fertilizerItemId = chest != null && slot >= 0 && slot < chest.itemIds.Length
+                ? chest.itemIds[slot]
+                : FERTILIZER_ITEM_ID;
+            InventoryItem fertilizer = Inventory.Instance.allItems[fertilizerItemId];
             if (fertilizer == null)
                 return;
 
@@ -6207,6 +6275,24 @@ namespace Autom8er
             int newTileType = fertilizer.getResultingPlaceableTileType(WorldManager.Instance.tileTypeMap[xPos, yPos]);
             NetworkMapSharer.Instance.RpcUpdateTileType(newTileType, xPos, yPos);
             WorldManager.Instance.tileTypeMap[xPos, yPos] = newTileType;
+            ConsumeOneItem(chest, slot);
+        }
+
+        private static void ApplyInstaGrowAt(Chest chest, int slot, int xPos, int yPos)
+        {
+            int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
+            TileObjectGrowthStages growth = tileObjectId >= 0 && tileObjectId < WorldManager.Instance.allObjects.Length
+                ? WorldManager.Instance.allObjects[tileObjectId].tileObjectGrowthStages
+                : null;
+
+            if (growth == null || growth.objectStages == null || growth.objectStages.Length == 0)
+                return;
+
+            ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
+            int newStatus = Mathf.Clamp(WorldManager.Instance.onTileStatusMap[xPos, yPos] + Random.Range(1, 4), 0, growth.objectStages.Length - 1);
+            WorldManager.Instance.onTileStatusMap[xPos, yPos] = newStatus;
+            NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, xPos, yPos);
+            NetworkMapSharer.Instance.RpcUseInstagrow(xPos, yPos);
             ConsumeOneItem(chest, slot);
         }
 
