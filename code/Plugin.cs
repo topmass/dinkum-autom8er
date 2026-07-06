@@ -283,7 +283,7 @@ namespace Autom8er
                 "Quality of Life",
                 "FreeChestCratePainting",
                 true,
-                "Painting chests and crates changes their colour without consuming the paint can. Vehicle and house painting are unchanged."
+                "Painting chests and crates changes their colour without consuming the paint can. Vehicle painting is unchanged."
             );
 
             ConveyorTileItemId = configConveyorTileItemId.Value;
@@ -299,7 +299,7 @@ namespace Autom8er
             InfiniteFranklinOrdering = configInfiniteFranklinOrdering.Value;
             FreeChestCratePainting = configFreeChestCratePainting.Value;
 
-            Log.LogInfo("Autom8er v1.7.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", InfiniteToolRebuy=" + InfiniteToolRebuy + ", FranklinOrdering=" + InfiniteFranklinOrdering + ", FreeChestCratePainting=" + FreeChestCratePainting);
+            Log.LogInfo("Autom8er v1.7.1 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", InfiniteToolRebuy=" + InfiniteToolRebuy + ", FranklinOrdering=" + InfiniteFranklinOrdering + ", FreeChestCratePainting=" + FreeChestCratePainting);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
