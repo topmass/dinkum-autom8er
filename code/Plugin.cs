@@ -32,6 +32,9 @@ namespace Autom8er
         private ConfigEntry<bool> configAnimationEnabled;
         private ConfigEntry<float> configAnimationSpeed;
         private ConfigEntry<bool> configStackableCritters;
+        private ConfigEntry<bool> configInfiniteToolRebuy;
+        private ConfigEntry<bool> configInfiniteFranklinOrdering;
+        private ConfigEntry<bool> configFreeChestCratePainting;
 
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
@@ -52,6 +55,7 @@ namespace Autom8er
         // Item IDs
         public const int HAR_VAC_ITEM_ID = 1728;
         public const int TROPICAL_GRASS_TURF_ROLL_ITEM_ID = 1445;
+        public const int WATER_TANK_ITEM_ID = 692;
 
         // Cached at runtime from item data
         public static int ConveyorTileType = -1;
@@ -64,6 +68,9 @@ namespace Autom8er
         public static bool AnimationEnabled = true;
         public static float AnimationSpeed = 2f;
         public static bool StackableCritters = true;
+        public static bool InfiniteToolRebuy = false;
+        public static bool InfiniteFranklinOrdering = true;
+        public static bool FreeChestCratePainting = true;
         internal const int ACTIVE_FARMER_CRATES_PER_STEP = 4;
         internal const int FARMER_ACTIONS_PER_STEP = 2;
         internal const float FARMER_STEP_DELAY_SECONDS = 0.1f;
@@ -115,6 +122,13 @@ namespace Autom8er
             Log.LogWarning(message);
         }
 
+        internal static bool CanRunServerAutomation()
+        {
+            return NetworkServer.active &&
+                NetworkMapSharer.Instance != null &&
+                NetworkMapSharer.Instance.isServer;
+        }
+
         internal static bool IsDurabilityTransferItem(int itemId)
         {
             if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
@@ -145,7 +159,7 @@ namespace Autom8er
 
         internal static void RemoveTransferredItemFromChest(Chest sourceChest, int slot, int itemId, int moveAmount, HouseDetails inside)
         {
-            if (sourceChest == null || slot < 0 || slot >= sourceChest.itemStacks.Length)
+            if (!CanRunServerAutomation() || sourceChest == null || slot < 0 || slot >= sourceChest.itemStacks.Length)
                 return;
 
             if (Plugin.IsDurabilityTransferItem(itemId))
@@ -251,6 +265,27 @@ namespace Autom8er
                 "Disable to keep vanilla critter stacking behavior (1 per slot)."
             );
 
+            configInfiniteToolRebuy = Config.Bind(
+                "Quality of Life",
+                "InfiniteToolRebuy",
+                false,
+                "Allow real shop/tool displays to be bought repeatedly in the same day instead of marking sold out."
+            );
+
+            configInfiniteFranklinOrdering = Config.Bind(
+                "Quality of Life",
+                "InfiniteFranklinOrdering",
+                true,
+                "Allow Franklin crafting orders to be placed repeatedly in the same day while keeping normal mail delivery."
+            );
+
+            configFreeChestCratePainting = Config.Bind(
+                "Quality of Life",
+                "FreeChestCratePainting",
+                true,
+                "Painting chests and crates changes their colour without consuming the paint can. Vehicle and house painting are unchanged."
+            );
+
             ConveyorTileItemId = configConveyorTileItemId.Value;
             KeepOneItem = configKeepOneItem.Value;
             ScanInterval = Mathf.Clamp(configScanInterval.Value, 0.1f, 1.0f);
@@ -260,8 +295,11 @@ namespace Autom8er
             AnimationEnabled = configAnimationEnabled.Value;
             AnimationSpeed = Mathf.Clamp(configAnimationSpeed.Value, 0.5f, 10f);
             StackableCritters = configStackableCritters.Value;
+            InfiniteToolRebuy = configInfiniteToolRebuy.Value;
+            InfiniteFranklinOrdering = configInfiniteFranklinOrdering.Value;
+            FreeChestCratePainting = configFreeChestCratePainting.Value;
 
-            Log.LogInfo("Autom8er v1.7.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters);
+            Log.LogInfo("Autom8er v1.7.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", InfiniteToolRebuy=" + InfiniteToolRebuy + ", FranklinOrdering=" + InfiniteFranklinOrdering + ", FreeChestCratePainting=" + FreeChestCratePainting);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -922,6 +960,135 @@ namespace Autom8er
         }
     }
 
+    [HarmonyPatch(typeof(ChestWindow), "closeChestInWindow")]
+    public static class VacuumCrateCloseWakePatch
+    {
+        public static void Prefix(ChestWindow __instance, Chest ___currentlyOpenedChest)
+        {
+            if (__instance == null || ___currentlyOpenedChest == null)
+                return;
+
+            if (__instance.isStash || __instance.isVehicleStorage != null || __instance.isNPCInv != null)
+                return;
+
+            if (NetworkMapSharer.Instance == null ||
+                NetworkMapSharer.Instance.localChar == null ||
+                NetworkMapSharer.Instance.localChar.myInteract == null)
+            {
+                return;
+            }
+
+            HouseDetails inside = NetworkMapSharer.Instance.localChar.myInteract.InsideHouseDetails;
+            if (!ConveyorHelper.IsVacuumCrate(___currentlyOpenedChest.xPos, ___currentlyOpenedChest.yPos, inside))
+                return;
+
+            VacuumCrateHelper.MarkCrateActive(___currentlyOpenedChest);
+        }
+    }
+
+    [HarmonyPatch(typeof(SprinklerTile), "waterTiles")]
+    public static class AutoFarmerWaterTankSprinklerPatch
+    {
+        public static void Postfix(SprinklerTile __instance, int xPos, int yPos)
+        {
+            // Vanilla waterTiles runs on every machine, but this check depends on chest
+            // contents only the server knows. Server-only; clients get the wet tiles via
+            // the server's sprinkerContinuesToWater RPCs.
+            if (!Plugin.CanRunServerAutomation())
+                return;
+
+            if (__instance == null || __instance.isTank || __instance.isSilo || WorldManager.Instance == null)
+                return;
+
+            if (!IsPositionOnMap(xPos, yPos))
+                return;
+
+            if (WorldManager.Instance.onTileStatusMap[xPos, yPos] != 0)
+                return;
+
+            if (!HasAutoFarmerWaterTankInRange(xPos, yPos))
+                return;
+
+            WaterSprinklerTiles(__instance, xPos, yPos);
+        }
+
+        private static bool HasAutoFarmerWaterTankInRange(int xPos, int yPos)
+        {
+            int minX = Mathf.Max(0, xPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxX = Mathf.Min(WorldManager.Instance.onTileMap.GetLength(0) - 1, xPos + Plugin.AUTO_FARMER_RANGE_TILES);
+            int minY = Mathf.Max(0, yPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxY = Mathf.Min(WorldManager.Instance.onTileMap.GetLength(1) - 1, yPos + Plugin.AUTO_FARMER_RANGE_TILES);
+
+            for (int x = minX; x <= maxX; x++)
+            {
+                for (int y = minY; y <= maxY; y++)
+                {
+                    if (!ConveyorHelper.IsVacuumCrate(x, y, null))
+                        continue;
+
+                    Chest chest = ConveyorHelper.FindChestAt(x, y, null);
+                    if (chest != null && chest.GetAmountOfItemInside(Plugin.WATER_TANK_ITEM_ID) > 0)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void WaterSprinklerTiles(SprinklerTile sprinkler, int xPos, int yPos)
+        {
+            WorldManager.Instance.onTileStatusMap[xPos, yPos] = 1;
+
+            for (int offsetX = -sprinkler.horizontalSize; offsetX <= sprinkler.horizontalSize; offsetX++)
+            {
+                for (int offsetY = -sprinkler.verticlSize; offsetY <= sprinkler.verticlSize; offsetY++)
+                {
+                    int tileX = xPos + offsetX;
+                    int tileY = yPos + offsetY;
+                    if (!IsPositionOnMap(tileX, tileY))
+                        continue;
+
+                    int wetVersion = WorldManager.Instance.tileTypes[WorldManager.Instance.tileTypeMap[tileX, tileY]].wetVersion;
+                    if (wetVersion == -1)
+                        continue;
+
+                    WorldManager.Instance.tileTypeMap[tileX, tileY] = wetVersion;
+                    MarkChunkChanged(tileX, tileY);
+                }
+            }
+
+            if (NetworkMapSharer.Instance != null && NetworkMapSharer.Instance.isServer)
+                WorldManager.Instance.sprinkerContinuesToWater(xPos, yPos);
+        }
+
+        private static bool IsPositionOnMap(int xPos, int yPos)
+        {
+            return WorldManager.Instance != null &&
+                WorldManager.Instance.onTileMap != null &&
+                xPos >= 0 &&
+                yPos >= 0 &&
+                xPos < WorldManager.Instance.onTileMap.GetLength(0) &&
+                yPos < WorldManager.Instance.onTileMap.GetLength(1);
+        }
+
+        private static void MarkChunkChanged(int xPos, int yPos)
+        {
+            if (WorldManager.Instance.chunkHasChangedToday == null)
+                return;
+
+            int chunkX = Mathf.RoundToInt(xPos / 10);
+            int chunkY = Mathf.RoundToInt(yPos / 10);
+            if (chunkX < 0 || chunkY < 0 ||
+                chunkX >= WorldManager.Instance.chunkHasChangedToday.GetLength(0) ||
+                chunkY >= WorldManager.Instance.chunkHasChangedToday.GetLength(1))
+            {
+                return;
+            }
+
+            WorldManager.Instance.chunkHasChangedToday[chunkX, chunkY] = true;
+        }
+    }
+
     public static class AutomationCreditHelper
     {
         public static void TryGrantMachineInputCredit(int itemId, int tileObjectId)
@@ -1404,12 +1571,55 @@ namespace Autom8er
         }
     }
 
+    [HarmonyPatch(typeof(ContainerManager), "GetAmountOfItemsInChestForTable")]
+    public static class CraftingTableBlackCrateAmountPatch
+    {
+        static bool Prefix(int itemId, int xPos, int yPos, ref int __result)
+        {
+            HouseDetails inside = null;
+            if (NetworkMapSharer.Instance != null &&
+                NetworkMapSharer.Instance.localChar != null &&
+                NetworkMapSharer.Instance.localChar.myInteract != null)
+            {
+                inside = NetworkMapSharer.Instance.localChar.myInteract.InsideHouseDetails;
+            }
+
+            if (ConveyorHelper.IsFilterCrate(xPos, yPos, inside))
+            {
+                __result = 0;
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    [HarmonyPatch(typeof(ContainerManager), "RemoveAmountOfItemsInChestForTable")]
+    public static class CraftingTableBlackCrateRemovePatch
+    {
+        static bool Prefix(int itemId, int removeAmount, int xPos, int yPos, int houseX, int houseY)
+        {
+            HouseDetails inside = null;
+            if (houseX != -1 || houseY != -1)
+            {
+                if (HouseManager.manage == null)
+                    return true;
+
+                inside = HouseManager.manage.getHouseInfoIfExists(houseX, houseY);
+                if (inside == null)
+                    return true;
+            }
+
+            return !ConveyorHelper.IsFilterCrate(xPos, yPos, inside);
+        }
+    }
+
     [HarmonyPatch(typeof(ShopManager), "sellStall")]
     public static class ShopManagerUnlimitedStockPatch
     {
         static bool Prefix(int type, int id)
         {
-            return false;
+            return !Plugin.InfiniteToolRebuy;
         }
     }
 
@@ -1421,7 +1631,125 @@ namespace Autom8er
             if (__instance == null)
                 return true;
 
+            if (!Plugin.InfiniteToolRebuy)
+                return true;
+
             return __instance.shopStallNo < 0;
+        }
+    }
+
+    [HarmonyPatch(typeof(GiveNPC), "tryToBuy")]
+    public static class FranklinRepeatBuyPatch
+    {
+        public class FranklinBuyState
+        {
+            public ShopBuyDrop Drop;
+            public int ItemId;
+        }
+
+        static void Prefix(GiveNPC __instance, ref FranklinBuyState __state)
+        {
+            __state = null;
+
+            if (!Plugin.InfiniteFranklinOrdering || __instance == null || __instance.dropToBuy == null)
+                return;
+
+            if (__instance.dropToBuy.insideShop != NPCSchedual.Locations.Craft_Workshop)
+                return;
+
+            __state = new FranklinBuyState
+            {
+                Drop = __instance.dropToBuy,
+                ItemId = __instance.dropToBuy.myItemId
+            };
+        }
+
+        static void Postfix(GiveNPC __instance, FranklinBuyState __state)
+        {
+            if (!Plugin.InfiniteFranklinOrdering || __instance == null || __state == null || __state.Drop == null || __state.ItemId < 0)
+                return;
+
+            if (__instance.dropToBuy != null || __state.Drop.myItemId != -1)
+                return;
+
+            __state.Drop.createItem(__state.ItemId);
+        }
+    }
+
+    [HarmonyPatch(typeof(CharMovement), "UserCode_CmdAgreeToCraftsmanCrafting")]
+    public static class FranklinRepeatOrderPatch
+    {
+        static bool Prefix()
+        {
+            return !Plugin.InfiniteFranklinOrdering;
+        }
+    }
+
+    [HarmonyPatch(typeof(CharPickUp), "CmdChangeTileVariation")]
+    public static class FreeChestCratePaintingMarkPatch
+    {
+        private static bool skipNextChestCratePaintConsume = false;
+        private static float skipPaintConsumeUntil = 0f;
+
+        static void Prefix(CharPickUp __instance, int newColour, int xPos, int yPos)
+        {
+            skipNextChestCratePaintConsume = Plugin.FreeChestCratePainting &&
+                IsPaintingChestOrCrate(__instance, xPos, yPos);
+            skipPaintConsumeUntil = skipNextChestCratePaintConsume ? Time.realtimeSinceStartup + 0.5f : 0f;
+        }
+
+        public static bool ShouldSkipNextPaintConsume()
+        {
+            if (!skipNextChestCratePaintConsume)
+                return false;
+
+            skipNextChestCratePaintConsume = false;
+            bool stillImmediate = Time.realtimeSinceStartup <= skipPaintConsumeUntil;
+            skipPaintConsumeUntil = 0f;
+            return stillImmediate;
+        }
+
+        private static bool IsPaintingChestOrCrate(CharPickUp picker, int xPos, int yPos)
+        {
+            if (picker == null || picker.myInteract == null || WorldManager.Instance == null)
+                return false;
+
+            HouseDetails inside = picker.myInteract.InsideHouseDetails;
+            int tileObjectId = ConveyorHelper.GetTileObjectId(xPos, yPos, inside);
+            if (tileObjectId < 0 || tileObjectId >= WorldManager.Instance.allObjects.Length)
+                return false;
+
+            TileObject tileObject = WorldManager.Instance.allObjects[tileObjectId];
+            return tileObject != null && tileObject.tileObjectChest != null;
+        }
+    }
+
+    [HarmonyPatch(typeof(Inventory), "consumeItemInHand")]
+    public static class FreeChestCratePaintingConsumePatch
+    {
+        static bool Prefix()
+        {
+            if (!Plugin.FreeChestCratePainting ||
+                Inventory.Instance == null ||
+                Inventory.Instance.invSlots == null ||
+                Inventory.Instance.allItems == null)
+            {
+                return true;
+            }
+
+            int selectedSlot = Inventory.Instance.selectedSlot;
+            if (selectedSlot < 0 || selectedSlot >= Inventory.Instance.invSlots.Length)
+                return true;
+
+            int itemId = Inventory.Instance.invSlots[selectedSlot].itemNo;
+            if (itemId < 0 || itemId >= Inventory.Instance.allItems.Length)
+                return true;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            if (item == null || item.GetComponent<PaintCan>() == null)
+                return true;
+
+            return !FreeChestCratePaintingMarkPatch.ShouldSkipNextPaintConsume();
         }
     }
 
@@ -1698,8 +2026,14 @@ namespace Autom8er
 
         public static bool TryDepositHarvestToChest(Chest chest, HouseDetails inside, int itemId, int amount, System.Action onDepositSuccess = null)
         {
-            if (chest == null || itemId < 0)
+            if (!Plugin.CanRunServerAutomation() ||
+                chest == null ||
+                itemId < 0 ||
+                Inventory.Instance == null ||
+                ContainerManager.manage == null)
+            {
                 return false;
+            }
 
             int slotIndex = ConveyorHelper.FindSlotForItem(chest, itemId);
             if (slotIndex == -1)
@@ -4632,6 +4966,8 @@ namespace Autom8er
         private static readonly int[] dy = { 0, -1, 0, 1 };
         private const int FERTILIZER_ITEM_ID = 275;
         private const int SEASON_ALL_ITEM_ID = 1367;
+        private const int SEASON_ALL_DRY_TILE_TYPE = 43;
+        private const int SEASON_ALL_WET_TILE_TYPE = 44;
         private const int INSTA_GROW_ITEM_ID = 1671;
         private const int VACUUM_HARVEST_RADIUS_TILES = 10;
         private const int VACUUM_PICKUP_RADIUS_TILES = 12;
@@ -5116,6 +5452,9 @@ namespace Autom8er
                 if (drop == null || drop.myItemId < 0 || drop.stackAmount <= 0)
                     continue;
 
+                if (IsVehicleItem(drop.myItemId))
+                    continue;
+
                 if (!drop.IsDropOnCurrentLevel() || pendingDrops.Contains(drop.netId))
                     continue;
 
@@ -5387,7 +5726,7 @@ namespace Autom8er
                 return true;
             }
 
-            int fertilizerSlot = FindItemSlot(chest, IsFertilizerItem);
+            int fertilizerSlot = FindFertilizerSlot(chest);
             bool hasFertilizer = fertilizerSlot != -1;
 
             if (hasHoeTool && hasFertilizer && TryFindBestFarmTile(chest, CanFertilizeTile, out FarmTileTarget fertilizeTarget))
@@ -5458,7 +5797,7 @@ namespace Autom8er
             {
                 int seedItemId = GetFirstCropSeedItemId(chest);
                 bool hasSeed = seedItemId >= 0;
-                bool hasFertilizer = FindItemSlot(chest, IsFertilizerItem) != -1;
+                bool hasFertilizer = FindFertilizerSlot(chest) != -1;
 
                 if (!hasSeed && !hasFertilizer)
                     break;
@@ -5476,7 +5815,7 @@ namespace Autom8er
 
                 if (plan.shouldFertilize)
                 {
-                    int fertilizerSlot = FindItemSlot(chest, IsFertilizerItem);
+                    int fertilizerSlot = FindFertilizerSlot(chest);
                     if (fertilizerSlot != -1 && CanFertilizeEmptyTile(plan.xPos, plan.yPos))
                     {
                         ApplyFertilizerAt(chest, fertilizerSlot, plan.xPos, plan.yPos);
@@ -5487,7 +5826,10 @@ namespace Autom8er
                 if (plan.seedItemId >= 0)
                 {
                     int seedSlot = FindItemSlot(chest, itemId => itemId == plan.seedItemId);
-                    if (seedSlot != -1 && CanPlantSeedAt(plan.seedItemId, plan.xPos, plan.yPos))
+                    bool canPlantSeed = (plan.shouldHoe || plan.shouldFertilize)
+                        ? CanPlantSeedAtNow(plan.seedItemId, plan.xPos, plan.yPos)
+                        : CanPlantSeedAt(plan.seedItemId, plan.xPos, plan.yPos);
+                    if (seedSlot != -1 && canPlantSeed)
                     {
                         PlantSeedAt(chest, seedSlot, plan.seedItemId, plan.xPos, plan.yPos);
                         didWork = true;
@@ -5565,7 +5907,7 @@ namespace Autom8er
             {
                 int tilledTileType = WeatherManager.Instance != null && WeatherManager.Instance.IsRaining ? 8 : 7;
                 canHoeThenFertilize = hasFertilizer && IsEmptyFarmObject(xPos, yPos) && (tilledTileType == 7 || tilledTileType == 8);
-                canHoeThenPlant = hasSeed && IsEmptyFarmObjectAfterHoe(xPos, yPos) && SeedCanPlantOnTilledTile(seedItemId, tilledTileType);
+                canHoeThenPlant = CanHoeThenPlantSeedAt(seedItemId, xPos, yPos);
             }
 
             bool shouldHoe = false;
@@ -5797,6 +6139,17 @@ namespace Autom8er
             return ConveyorHelper.CanDepositFromPosition(chest.xPos, chest.yPos, inside, itemId);
         }
 
+        public static bool IsVehicleItem(int itemId)
+        {
+            if (itemId < 0 || Inventory.Instance == null || Inventory.Instance.allItems == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            return item != null &&
+                item.spawnPlaceable != null &&
+                item.spawnPlaceable.GetComponent<Vehicle>() != null;
+        }
+
         private static bool HasAnyCropSeed(Chest chest)
         {
             return FindItemSlot(chest, IsCropSeedItem) != -1;
@@ -5836,10 +6189,19 @@ namespace Autom8er
             return -1;
         }
 
+        private static int FindFertilizerSlot(Chest chest)
+        {
+            int seasonAllSlot = FindItemSlot(chest, itemId => itemId == SEASON_ALL_ITEM_ID);
+            return seasonAllSlot != -1 ? seasonAllSlot : FindItemSlot(chest, itemId => itemId == FERTILIZER_ITEM_ID);
+        }
+
         private static bool ShouldRetainForAutoFarmer(Chest chest, int itemId)
         {
-            if (IsHoeToolItem(itemId) || IsShovelToolItem(itemId) || IsFertilizerItem(itemId) || IsGrowthBoosterItem(itemId) || IsCropSeedItem(itemId))
+            if (itemId == Plugin.WATER_TANK_ITEM_ID ||
+                IsHoeToolItem(itemId) || IsShovelToolItem(itemId) || IsFertilizerItem(itemId) || IsGrowthBoosterItem(itemId) || IsCropSeedItem(itemId))
+            {
                 return true;
+            }
 
             if (!IsTreePlantingItem(itemId) || chest == null || !HasShovelTool(chest))
                 return false;
@@ -6100,7 +6462,7 @@ namespace Autom8er
             }
 
             int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
-            if (tileType == 7 || tileType == 8 || tileType == 12 || tileType == 13)
+            if (tileType == 7 || tileType == 8 || tileType == 12 || tileType == 13 || tileType == SEASON_ALL_DRY_TILE_TYPE || tileType == SEASON_ALL_WET_TILE_TYPE)
                 return false;
 
             var tileInfo = WorldManager.Instance.tileTypes[tileType];
@@ -6130,11 +6492,20 @@ namespace Autom8er
                 return false;
 
             int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
-            if (tileType != 7 && tileType != 8 && tileType != 12 && tileType != 13)
+            if (tileType != 7 && tileType != 8 && tileType != 12 && tileType != 13 && tileType != SEASON_ALL_DRY_TILE_TYPE && tileType != SEASON_ALL_WET_TILE_TYPE)
                 return false;
 
             int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
             return tileObjectId == -1 || tileObjectId == 30;
+        }
+
+        private static bool CanHoeThenPlantSeedAt(int itemId, int xPos, int yPos)
+        {
+            if (!CanHoeTile(xPos, yPos))
+                return false;
+
+            int tilledTileType = WeatherManager.Instance != null && WeatherManager.Instance.IsRaining ? 8 : 7;
+            return IsEmptyFarmObjectAfterHoe(xPos, yPos) && SeedCanPlantOnTilledTile(itemId, tilledTileType);
         }
 
         private static bool SeedCanPlantOnTilledTile(int itemId, int tileType)
@@ -6142,7 +6513,7 @@ namespace Autom8er
             if (!IsCropSeedItem(itemId))
                 return false;
 
-            return tileType == 7 || tileType == 8 || tileType == 12 || tileType == 13;
+            return tileType == 7 || tileType == 8 || tileType == 12 || tileType == 13 || tileType == SEASON_ALL_DRY_TILE_TYPE || tileType == SEASON_ALL_WET_TILE_TYPE;
         }
 
         private static bool IsEmptyFarmObject(int xPos, int yPos)
@@ -6272,10 +6643,27 @@ namespace Autom8er
                 return;
 
             ReserveFarmTile(xPos, yPos, Time.time + FARM_TILE_RESERVATION_SECONDS);
-            int newTileType = fertilizer.getResultingPlaceableTileType(WorldManager.Instance.tileTypeMap[xPos, yPos]);
+            int currentTileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
+            int newTileType = fertilizerItemId == SEASON_ALL_ITEM_ID
+                ? GetSeasonAllResultTileType(fertilizer, currentTileType)
+                : fertilizer.getResultingPlaceableTileType(currentTileType);
             NetworkMapSharer.Instance.RpcUpdateTileType(newTileType, xPos, yPos);
             WorldManager.Instance.tileTypeMap[xPos, yPos] = newTileType;
             ConsumeOneItem(chest, slot);
+        }
+
+        private static int GetSeasonAllResultTileType(InventoryItem seasonAll, int currentTileType)
+        {
+            if (seasonAll != null)
+            {
+                int metadataResult = seasonAll.getResultingPlaceableTileType(currentTileType);
+                if (metadataResult > 0)
+                    return metadataResult;
+            }
+
+            return currentTileType == 8 || currentTileType == 13 || currentTileType == SEASON_ALL_WET_TILE_TYPE
+                ? SEASON_ALL_WET_TILE_TYPE
+                : SEASON_ALL_DRY_TILE_TYPE;
         }
 
         private static void ApplyInstaGrowAt(Chest chest, int slot, int xPos, int yPos)
@@ -6406,7 +6794,7 @@ namespace Autom8er
                 {
                     case PendingFarmActionType.Fertilize:
                     {
-                        int slot = FindItemSlot(chest, IsFertilizerItem);
+                        int slot = FindFertilizerSlot(chest);
                         if (slot != -1 && CanFertilizeTileNow(action.tileX, action.tileY))
                         {
                             ApplyFertilizerAt(chest, slot, action.tileX, action.tileY);
@@ -6501,7 +6889,7 @@ namespace Autom8er
                 return false;
 
             int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
-            if (tileType != 7 && tileType != 8 && tileType != 12 && tileType != 13)
+            if (tileType != 7 && tileType != 8 && tileType != 12 && tileType != 13 && tileType != SEASON_ALL_DRY_TILE_TYPE && tileType != SEASON_ALL_WET_TILE_TYPE)
                 return false;
 
             int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
@@ -6826,7 +7214,7 @@ namespace Autom8er
             }
 
             int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
-            bool isFarmSoil = tileType == 7 || tileType == 8 || tileType == 12 || tileType == 13 || tileType == 43 || tileType == 44;
+            bool isFarmSoil = tileType == 7 || tileType == 8 || tileType == 12 || tileType == 13 || tileType == SEASON_ALL_DRY_TILE_TYPE || tileType == SEASON_ALL_WET_TILE_TYPE;
             return isFarmSoil && growth.canBeHarvested(WorldManager.Instance.onTileStatusMap[xPos, yPos], deathCheck: true);
         }
 
@@ -6916,7 +7304,7 @@ namespace Autom8er
 
         private static bool TryRemoveDropFromWorld(DroppedItem drop)
         {
-            if (drop == null)
+            if (!Plugin.CanRunServerAutomation() || drop == null || WorldManager.Instance == null || WorldManager.Instance.itemsOnGround == null)
                 return false;
 
             try
@@ -9099,7 +9487,12 @@ namespace Autom8er
 
             ConveyorHelper.OutputDestination depositDestination;
             if (!ConveyorHelper.TryFindBestOutputDestinationFromNetworkAnchor(targetChest, null, outputId, includeAnchorChest: true, excludeVacuumCrates: false, out depositDestination))
+            {
+                // No destination is a failure of THIS chest's network, not the pond.
+                // Unmark so a later chest in the scan can still claim this pond today.
+                checkedPonds.Remove(pondKey);
                 return false;
+            }
 
             FilterCrateHelper.MarkRouteActive(depositDestination.routeX, depositDestination.routeY, null);
 
