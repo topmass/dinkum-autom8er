@@ -17,8 +17,14 @@ namespace Autom8er
         private const bool VerboseItemLogging = false;
         private Harmony harmony;
         private float scanTimer = 0f;
+        private bool conveyorTileLookupFailed = false;
+
+        // One cursor per batch list: sharing a cursor across two lists makes the modulo
+        // position leak between them and can permanently starve specific crates.
+        private int nextFarmerCrateIndex = 0;
         private int nextVacuumCrateIndex = 0;
         private int nextIdleVacuumCrateIndex = 0;
+        private int nextInteractingFilterCrateIndex = 0;
         private int nextFilterCrateIndex = 0;
         private int nextIdleFilterCrateIndex = 0;
 
@@ -103,6 +109,11 @@ namespace Autom8er
                 Log.LogInfo("Autom8er: Queued load catch-up.");
         }
 
+        // Conditional strips every call site - including its string concatenation, which
+        // otherwise allocates on every transfer even with logging off - from the build
+        // unless AUTOM8ER_VERBOSE_LOG is defined. To get verbose logs: add the symbol to
+        // <DefineConstants> in the csproj and set VerboseItemLogging = true.
+        [System.Diagnostics.Conditional("AUTOM8ER_VERBOSE_LOG")]
         internal static void LogVerbose(string message)
         {
             if (VerboseItemLogging && Log != null)
@@ -124,9 +135,15 @@ namespace Autom8er
 
         internal static bool CanRunServerAutomation()
         {
+            // While the host is underground/off-island the game redirects changeSlotInChest
+            // to nonSavedChests: surface chest writes silently no-op server-side but still
+            // RPC clients, causing free items and guest desync. Pause automation instead.
             return NetworkServer.active &&
                 NetworkMapSharer.Instance != null &&
-                NetworkMapSharer.Instance.isServer;
+                NetworkMapSharer.Instance.isServer &&
+                RealWorldTimeLight.time != null &&
+                !RealWorldTimeLight.time.underGround &&
+                !RealWorldTimeLight.time.offIsland;
         }
 
         internal static bool IsDurabilityTransferItem(int itemId)
@@ -312,21 +329,35 @@ namespace Autom8er
             AutoFarmerRangeGuide.Update();
             ConveyorNetSync.ClientUpdate();
 
+            // Item-data overrides are purely local and must apply on GUESTS too - otherwise
+            // a modded client's stacking UI disagrees with the host's stacked chest data.
+            if (!crittersPatched && Inventory.Instance != null)
+            {
+                ApplyStackabilityOverrides();
+            }
+
             if (!NetworkServer.active)
                 return;
 
             if (Inventory.Instance == null || WorldManager.Instance == null || ContainerManager.manage == null)
                 return;
 
-            // Cache the conveyor tile type once
-            if (ConveyorTileType == -1)
+            // Cache the conveyor tile type once; a failed lookup is permanent for the
+            // session (bad config value), so don't retry and re-warn every frame
+            if (ConveyorTileType == -1 && !conveyorTileLookupFailed)
             {
                 CacheConveyorTileType();
             }
 
-            if (!crittersPatched)
+            // While the host is underground/off-island the game redirects surface chest writes
+            // to nonSavedChests (silent server-side no-ops that still RPC clients). Pause the
+            // scan AND freeze in-flight animations; do NOT clear them - clearing executes their
+            // deposit callbacks into the no-op path and destroys the items. Frozen transfers
+            // resume and deposit correctly when the host returns to the surface.
+            if (RealWorldTimeLight.time != null &&
+                (RealWorldTimeLight.time.underGround || RealWorldTimeLight.time.offIsland))
             {
-                ApplyStackabilityOverrides();
+                return;
             }
 
             ConveyorNetSync.ServerUpdate();
@@ -413,11 +444,13 @@ namespace Autom8er
                 else
                 {
                     Log.LogWarning("Autom8er: Item ID " + ConveyorTileItemId + " is not a valid path/floor tile!");
+                    conveyorTileLookupFailed = true;
                 }
             }
             else
             {
                 Log.LogWarning("Autom8er: Invalid conveyor tile Item ID: " + ConveyorTileItemId);
+                conveyorTileLookupFailed = true;
             }
         }
 
@@ -552,7 +585,7 @@ namespace Autom8er
                     idleVacuumCrates.Add(chest);
             }
 
-            ProcessFarmerCrateBatch(activeFarmerCrates, ref nextVacuumCrateIndex, VACUUM_ACTIVE_SCAN_INTERVAL, MAX_ACTIVE_FARMER_CRATES_PER_PASS);
+            ProcessFarmerCrateBatch(activeFarmerCrates, ref nextFarmerCrateIndex, VACUUM_ACTIVE_SCAN_INTERVAL, MAX_ACTIVE_FARMER_CRATES_PER_PASS);
             ProcessVacuumCrateBatch(activeVacuumCrates, ref nextVacuumCrateIndex, VACUUM_ACTIVE_SCAN_INTERVAL, MAX_ACTIVE_VACUUM_CRATES_PER_PASS);
             ProcessVacuumCrateBatch(idleVacuumCrates, ref nextIdleVacuumCrateIndex, VACUUM_IDLE_SCAN_INTERVAL, MAX_IDLE_VACUUM_CRATES_PER_PASS);
         }
@@ -606,7 +639,7 @@ namespace Autom8er
                     idleFilterCrates.Add(chest);
             }
 
-            ProcessFilterCrateBatch(interactingFilterCrates, ref nextFilterCrateIndex, ScanInterval, MAX_INTERACTING_FILTER_CRATES_PER_PASS);
+            ProcessFilterCrateBatch(interactingFilterCrates, ref nextInteractingFilterCrateIndex, ScanInterval, MAX_INTERACTING_FILTER_CRATES_PER_PASS);
             ProcessFilterCrateBatch(activeFilterCrates, ref nextFilterCrateIndex, FILTER_ACTIVE_SCAN_INTERVAL, MAX_ACTIVE_FILTER_CRATES_PER_PASS);
             ProcessFilterCrateBatch(idleFilterCrates, ref nextIdleFilterCrateIndex, FILTER_IDLE_SCAN_INTERVAL, MAX_IDLE_FILTER_CRATES_PER_PASS);
         }
@@ -1401,7 +1434,9 @@ namespace Autom8er
             // Find chest within search radius. Some non-farm natural harvestables
             // are explicitly forced into a nearby green VacuFarm crate while still
             // using the vanilla harvest() path.
-            Chest targetChest = HarvestHelper.CurrentHarvestForcedChest;
+            Chest targetChest = HarvestHelper.ConsumeForcedHarvestChestAt(xPos, yPos);
+            if (targetChest == null)
+                targetChest = HarvestHelper.CurrentHarvestForcedChest;
             if (targetChest == null)
                 targetChest = HarvestHelper.FindAdjacentChestForHarvest(xPos, yPos, inside, searchRadius);
             if (targetChest == null)
@@ -1409,6 +1444,9 @@ namespace Autom8er
 
             // Harvest all items to chest
             bool harvestedAny = false;
+            // Drops with no chest slot are collected here; if we end up skipping the vanilla
+            // harvest they must be ground-dropped like vanilla would, not silently destroyed.
+            List<int> unfitDropIds = null;
             int sourceTileObjectId = __instance.GetComponent<TileObject>().tileObjectId;
 
             if (__instance.isCrabPot)
@@ -1440,6 +1478,11 @@ namespace Autom8er
                             HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
 
                         Plugin.LogVerbose("Autom8er: Crab pot harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
+                    }
+                    else
+                    {
+                        if (unfitDropIds == null) unfitDropIds = new List<int>();
+                        unfitDropIds.Add(itemId);
                     }
                 }
             }
@@ -1481,6 +1524,11 @@ namespace Autom8er
                                     HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
 
                                 Plugin.LogVerbose("Autom8er: Harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
+                            }
+                            else
+                            {
+                                if (unfitDropIds == null) unfitDropIds = new List<int>();
+                                unfitDropIds.Add(itemId);
                             }
                         }
                     }
@@ -1524,6 +1572,11 @@ namespace Autom8er
 
                                     Plugin.LogVerbose("Autom8er: Harvest (loot) -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                                 }
+                                else
+                                {
+                                    if (unfitDropIds == null) unfitDropIds = new List<int>();
+                                    unfitDropIds.Add(itemId);
+                                }
                             }
                         }
                     }
@@ -1532,6 +1585,14 @@ namespace Autom8er
 
             if (harvestedAny)
             {
+                // Vanilla harvest() is being skipped, so any drop that had no chest slot
+                // must still be spawned on the ground like vanilla would have done.
+                if (unfitDropIds != null && NetworkMapSharer.Instance != null && WorldManager.Instance != null)
+                {
+                    Vector3 dropPos = new Vector3(xPos * 2, WorldManager.Instance.heightMap[xPos, yPos], yPos * 2);
+                    for (int i = 0; i < unfitDropIds.Count; i++)
+                        NetworkMapSharer.Instance.spawnAServerDrop(unfitDropIds[i], 1, dropPos, inside);
+                }
                 return false; // Skip original (we handled it)
             }
 
@@ -1564,6 +1625,9 @@ namespace Autom8er
             ConveyorHelper.ClearFilterDistributionState();
             FilterCrateHelper.ClearBulkDistributionState();
             QuarryHelper.ClearState();
+            VacuumCrateHelper.ClearState();
+            HarvestHelper.ResetRuntimeState();
+            NewDayHarvestPatch.ResetRunningFlag();
             Plugin.QueueLoadCatchUp();
         }
 
@@ -2049,6 +2113,13 @@ namespace Autom8er
         private const float POST_QUARRY_PHASE_DELAY_SECONDS = 0.5f;
         private static bool phasedHarvestRunning = false;
 
+        // Save/load safety net: if the phased coroutine died without its finally running,
+        // a stale true here would silence day-change harvesting until app restart.
+        public static void ResetRunningFlag()
+        {
+            phasedHarvestRunning = false;
+        }
+
         // MoveNext is the actual coroutine method generated by the compiler
         static void Postfix()
         {
@@ -2142,9 +2213,53 @@ namespace Autom8er
         public static HouseDetails CurrentHarvestInside = null;
         public static Chest CurrentHarvestForcedChest = null;
 
+        // Forced routing for RPC-deferred harvests: RpcHarvestObject is a Mirror send-stub,
+        // so harvest() runs after the caller's stack (and its finally) has unwound - a
+        // transient static can't carry the owning crate across that gap. Keyed by tile.
+        private class ForcedChestEntry
+        {
+            public Chest chest;
+            public float expireAt;
+        }
+        private static readonly Dictionary<long, ForcedChestEntry> forcedHarvestChests = new Dictionary<long, ForcedChestEntry>();
+
+        public static void SetForcedHarvestChestAt(int xPos, int yPos, Chest chest)
+        {
+            forcedHarvestChests[((long)xPos << 32) | (uint)yPos] = new ForcedChestEntry
+            {
+                chest = chest,
+                expireAt = Time.realtimeSinceStartup + 2f
+            };
+        }
+
+        public static Chest ConsumeForcedHarvestChestAt(int xPos, int yPos)
+        {
+            long key = ((long)xPos << 32) | (uint)yPos;
+            ForcedChestEntry entry;
+            if (!forcedHarvestChests.TryGetValue(key, out entry))
+                return null;
+
+            forcedHarvestChests.Remove(key);
+            return Time.realtimeSinceStartup <= entry.expireAt ? entry.chest : null;
+        }
+
+        public static void ClearForcedHarvestChests()
+        {
+            forcedHarvestChests.Clear();
+        }
+
         public static void ResetDayChangeAnimationStagger()
         {
             dayChangeAnimationCounts.Clear();
+        }
+
+        // Save/load runtime-state reset (spec rule 12): stagger counts keyed by the old
+        // world's chests, forced-chest handoffs, and the single-flight harvest flag.
+        public static void ResetRuntimeState()
+        {
+            dayChangeAnimationCounts.Clear();
+            dayChangeMachineHarvestRunning = false;
+            ClearForcedHarvestChests();
         }
 
         public static float GetNextDayChangeAnimationDelay(Chest chest)
@@ -2321,6 +2436,12 @@ namespace Autom8er
                 return false;
             }
 
+            // A captured chest may have been picked up/replaced during a long animation;
+            // changeSlotInChest would then silently no-op while we report success, granting
+            // credit and skipping fallbacks for a deposit that never happened.
+            if (ContainerManager.manage.getChestForWindow(chest.xPos, chest.yPos, inside) != chest)
+                return false;
+
             int slotIndex = ConveyorHelper.FindSlotForItem(chest, itemId);
             if (slotIndex == -1)
                 return false;
@@ -2365,7 +2486,7 @@ namespace Autom8er
 
                 HashSet<long> checkedPositions = new HashSet<long>();
 
-                List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChests();
+                List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChestsShared();
 
                 foreach (Chest chest in chestsCopy)
                 {
@@ -2751,7 +2872,7 @@ namespace Autom8er
             if (quarryNodeIds.Count == 0)
                 return 0;
 
-            List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChests();
+            List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChestsShared();
             if (chestsCopy.Count == 0)
                 return 0;
 
@@ -3234,6 +3355,22 @@ namespace Autom8er
 
         public static bool TryFeedAdjacentMachine(Chest sourceChest, HouseDetails inside)
         {
+            // Hoisted: without any adjacent machine, the slot loop below re-reads the same
+            // 4 neighbor tiles once per item slot (up to 96 reads per chest per tick).
+            bool anyAdjacentMachine = false;
+            for (int i = 0; i < 4; i++)
+            {
+                int tileId = GetTileObjectId(sourceChest.xPos + dx[i], sourceChest.yPos + dy[i], inside);
+                if (tileId >= 0 && WorldManager.Instance.allObjects[tileId] != null &&
+                    WorldManager.Instance.allObjects[tileId].tileObjectItemChanger != null)
+                {
+                    anyAdjacentMachine = true;
+                    break;
+                }
+            }
+            if (!anyAdjacentMachine)
+                return false;
+
             for (int slot = 0; slot < sourceChest.itemIds.Length; slot++)
             {
                 int itemId = sourceChest.itemIds[slot];
@@ -3294,8 +3431,9 @@ namespace Autom8er
                     else
                     {
                         // Regular items: need amountNeeded (plus 1 extra if KeepOneItem enabled)
-                        // AutoSorters are exempt from KeepOneItem
-                        bool keepOne = Plugin.KeepOneItem && !IsAutoSorter(sourceChest);
+                        // AutoSorters are exempt from KeepOneItem; so are non-stackable items
+                        // (stack always 1, they would starve forever - spec Learning 8)
+                        bool keepOne = Plugin.KeepOneItem && !IsAutoSorter(sourceChest) && item.checkIfStackable();
                         int minRequired = keepOne ? amountNeeded + 1 : amountNeeded;
                         if (stack < minRequired)
                             continue;
@@ -3340,14 +3478,21 @@ namespace Autom8er
             return false;
         }
 
+        // Scratch buffers dedicated to TryFeedMachineViaConveyorPath (per-chest-per-tick hot
+        // path). Do NOT share with the per-transfer destination searches - those can nest.
+        private static readonly HashSet<Vector2Int> scratchFeedNetwork = new HashSet<Vector2Int>();
+        private static readonly Queue<Vector2Int> scratchFeedQueue = new Queue<Vector2Int>();
+
         public static bool TryFeedMachineViaConveyorPath(Chest sourceChest, HouseDetails inside)
         {
             if (Plugin.ConveyorTileType == -1)
                 return false;
 
             // Find conveyor tiles adjacent to this chest
-            HashSet<Vector2Int> pathNetwork = new HashSet<Vector2Int>();
-            Queue<Vector2Int> toExplore = new Queue<Vector2Int>();
+            scratchFeedNetwork.Clear();
+            scratchFeedQueue.Clear();
+            HashSet<Vector2Int> pathNetwork = scratchFeedNetwork;
+            Queue<Vector2Int> toExplore = scratchFeedQueue;
 
             for (int i = 0; i < 4; i++)
             {
@@ -3467,7 +3612,9 @@ namespace Autom8er
                         {
                             // Regular items: need amountNeeded (plus 1 extra if KeepOneItem enabled)
                             // AutoSorters are exempt from KeepOneItem
-                            bool keepOne = Plugin.KeepOneItem && !IsAutoSorter(sourceChest);
+                            // Non-stackable items (stack always 1) can never satisfy "keep one
+                            // plus amountNeeded" and would starve forever (spec Learning 8).
+                            bool keepOne = Plugin.KeepOneItem && !IsAutoSorter(sourceChest) && item.checkIfStackable();
                             int minRequired = keepOne ? amountNeeded + 1 : amountNeeded;
                             if (stack < minRequired)
                                 continue;
@@ -3503,23 +3650,35 @@ namespace Autom8er
                             int capturedMachineX = machineX;
                             int capturedMachineY = machineY;
                             HouseDetails capturedInside = inside;
+                            // Fuel items carry their durability in the stack field; the fallback
+                            // must return the full taken amount, not amountNeeded (spec: Blast
+                            // Furnace Rules - same principle as returning full ore batches).
+                            int capturedTransferAmount = isFuelItem ? stack : amountNeeded;
 
                             System.Action onArrival = () =>
                             {
-                                if (IsMachineEmpty(capturedMachineX, capturedMachineY, capturedInside))
+                                // finally: a leaked reservation blacklists this machine for
+                                // all automation until the next save/load clears it.
+                                try
                                 {
-                                    if (capturedInside != null)
-                                        NetworkMapSharer.Instance.RpcDepositItemIntoChangerInside(capturedItemId, capturedMachineX, capturedMachineY, capturedInside.xPos, capturedInside.yPos);
-                                    else
-                                        NetworkMapSharer.Instance.RpcDepositItemIntoChanger(capturedItemId, capturedMachineX, capturedMachineY);
-                                    NetworkMapSharer.Instance.startTileTimerOnServer(capturedItemId, capturedMachineX, capturedMachineY, capturedInside);
-                                    AutomationCreditHelper.TryGrantMachineInputCredit(capturedItemId, tileObjectId);
+                                    if (IsMachineEmpty(capturedMachineX, capturedMachineY, capturedInside))
+                                    {
+                                        if (capturedInside != null)
+                                            NetworkMapSharer.Instance.RpcDepositItemIntoChangerInside(capturedItemId, capturedMachineX, capturedMachineY, capturedInside.xPos, capturedInside.yPos);
+                                        else
+                                            NetworkMapSharer.Instance.RpcDepositItemIntoChanger(capturedItemId, capturedMachineX, capturedMachineY);
+                                        NetworkMapSharer.Instance.startTileTimerOnServer(capturedItemId, capturedMachineX, capturedMachineY, capturedInside);
+                                        AutomationCreditHelper.TryGrantMachineInputCredit(capturedItemId, tileObjectId);
+                                    }
+                                    else if (!FallbackDepositToAnyChest(capturedMachineX, capturedMachineY, capturedInside, capturedItemId, capturedTransferAmount))
+                                    {
+                                        Plugin.LogWarningThrottled("machine-occupied-item-lost", "Autom8er: Machine occupied on arrival, no chest available, item lost.");
+                                    }
                                 }
-                                else if (!FallbackDepositToAnyChest(capturedMachineX, capturedMachineY, capturedInside, capturedItemId, amountNeeded))
+                                finally
                                 {
-                    Plugin.LogWarningThrottled("machine-occupied-item-lost", "Autom8er: Machine occupied on arrival, no chest available, item lost.");
+                                    ConveyorAnimator.UnreserveTarget(capturedMachineX, capturedMachineY);
                                 }
-                                ConveyorAnimator.UnreserveTarget(capturedMachineX, capturedMachineY);
                             };
 
                             ConveyorAnimator.StartAnimation(itemId, isFuelItem ? stack : amountNeeded, path, onArrival, 0f, inside != null);
@@ -3612,7 +3771,10 @@ namespace Autom8er
 
                 System.Action onArrival = () =>
                 {
-                    int arrivalSlot = FindSlotForItem(capturedChest, capturedItemId);
+                    // Chest may have been picked up/replaced mid-animation; a stale object
+                    // makes changeSlotInChest silently no-op, so route to fallback instead.
+                    bool chestStillLive = ContainerManager.manage.getChestForWindow(capturedChestX, capturedChestY, capturedInside) == capturedChest;
+                    int arrivalSlot = chestStillLive ? FindSlotForItem(capturedChest, capturedItemId) : -1;
                     if (arrivalSlot == -1)
                     {
                         if (!FallbackDepositToAnyChest(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess))
@@ -3723,7 +3885,8 @@ namespace Autom8er
 
                     System.Action onArrival = () =>
                     {
-                        int arrivalSlot = FindSlotForItem(capturedChest, capturedItemId);
+                        bool chestStillLive = ContainerManager.manage.getChestForWindow(capturedChestX, capturedChestY, capturedInside) == capturedChest;
+                        int arrivalSlot = chestStillLive ? FindSlotForItem(capturedChest, capturedItemId) : -1;
                         if (arrivalSlot == -1)
                         {
                             if (!FallbackDepositToAnyChestLegacy(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess))
@@ -4734,13 +4897,27 @@ namespace Autom8er
 
         public static bool IsGenericAutomationRootContainer(int x, int y, HouseDetails inside)
         {
-            if (IsInputOnlyContainer(x, y, inside) ||
-                IsFilterCrate(x, y, inside) ||
-                IsVacuumCrate(x, y, inside) ||
-                IsSpecialContainer(x, y, inside))
-            {
+            // Read the tile ONCE - this predicate runs for every tile of full-map scans,
+            // and the four helper calls it replaced each re-read the same tile.
+            int tileObjectId = GetTileObjectId(x, y, inside);
+            if (tileObjectId <= 0)
                 return false;
-            }
+
+            if (tileObjectId == Plugin.WHITE_CRATE_TILE_ID ||
+                tileObjectId == Plugin.BLACK_CRATE_TILE_ID ||
+                tileObjectId == Plugin.GREEN_CRATE_TILE_ID)
+                return false;
+
+            TileObject tileObj = WorldManager.Instance.allObjects[tileObjectId];
+            if (tileObj == null || tileObj.tileObjectChest == null)
+                return false;
+
+            ChestPlaceable chestPlaceable = tileObj.tileObjectChest;
+            if (chestPlaceable.isFishPond || chestPlaceable.isBugTerrarium ||
+                chestPlaceable.isAutoPlacer ||
+                chestPlaceable.isMannequin || chestPlaceable.isToolRack ||
+                chestPlaceable.isDisplayStand)
+                return false;
 
             return FindChestAt(x, y, inside) != null;
         }
@@ -4757,6 +4934,9 @@ namespace Autom8er
 
         public static int GetTileObjectId(int x, int y, HouseDetails inside)
         {
+            if (x < 0 || y < 0)
+                return -1;
+
             if (inside != null)
             {
                 if (x >= inside.houseMapOnTile.GetLength(0) || y >= inside.houseMapOnTile.GetLength(1))
@@ -4878,6 +5058,9 @@ namespace Autom8er
         public static void ClearPendingSorts()
         {
             pendingSorts.Clear();
+            // The shared day-change chest collection holds Chest references from the old
+            // world; never let it survive into a different save (spec rule 12/14).
+            cachedOutdoorRootChests = null;
         }
 
         public static void QueueAutoSorterUpdate(Chest chest)
@@ -4916,13 +5099,16 @@ namespace Autom8er
             if (autoSorter.insideX != -1 && autoSorter.insideY != -1)
                 inside = HouseManager.manage.getHouseInfoIfExists(autoSorter.insideX, autoSorter.insideY);
 
-            int mapSize = WorldManager.Instance.GetMapSize();
+            // Bounds must match the map actually indexed below: houseMapOnTile is 25x25,
+            // so clamping against the world map size overruns it for indoor anchors.
+            int mapW = inside == null ? WorldManager.Instance.GetMapSize() : inside.houseMapOnTile.GetLength(0);
+            int mapH = inside == null ? WorldManager.Instance.GetMapSize() : inside.houseMapOnTile.GetLength(1);
 
             for (int x = autoSorter.xPos - 10; x <= autoSorter.xPos + 10; x++)
             {
                 for (int y = autoSorter.yPos - 10; y <= autoSorter.yPos + 10; y++)
                 {
-                    if (x < 0 || y < 0 || x >= mapSize || y >= mapSize)
+                    if (x < 0 || y < 0 || x >= mapW || y >= mapH)
                         continue;
 
                     bool hasChest;
@@ -4955,29 +5141,36 @@ namespace Autom8er
 
         private static IEnumerator AutoSorterBatchSort(Chest chest, long key)
         {
-            yield return new WaitForSeconds(1.0f);
-
-            EnsureNearbyChestsActive(chest);
-
-            int maxCycles = 24;
-            while (maxCycles-- > 0)
+            // finally guarantees the debounce key is released even if the sort throws
+            // or the coroutine is destroyed; a stuck key silences that sorter forever.
+            try
             {
-                bool hasItems = false;
-                for (int i = 0; i < chest.itemIds.Length; i++)
+                yield return new WaitForSeconds(1.0f);
+
+                EnsureNearbyChestsActive(chest);
+
+                int maxCycles = 24;
+                while (maxCycles-- > 0)
                 {
-                    if (chest.itemIds[i] != -1) { hasItems = true; break; }
+                    bool hasItems = false;
+                    for (int i = 0; i < chest.itemIds.Length; i++)
+                    {
+                        if (chest.itemIds[i] != -1) { hasItems = true; break; }
+                    }
+                    if (!hasItems) break;
+
+                    EnsureAutoSorterStatusClean(chest);
+
+                    yield return ContainerManager.manage.StartCoroutine(
+                        ContainerManager.manage.AutoSortItemsIntoNearbyChests(chest));
+
+                    yield return new WaitForSeconds(0.5f);
                 }
-                if (!hasItems) break;
-
-                EnsureAutoSorterStatusClean(chest);
-
-                yield return ContainerManager.manage.StartCoroutine(
-                    ContainerManager.manage.AutoSortItemsIntoNearbyChests(chest));
-
-                yield return new WaitForSeconds(0.5f);
             }
-
-            pendingSorts.Remove(key);
+            finally
+            {
+                pendingSorts.Remove(key);
+            }
         }
 
         public static void EnsureAutomationChestsActive(Chest anchorChest)
@@ -5016,6 +5209,24 @@ namespace Autom8er
                     ContainerManager.manage.getChestForRecycling(x, y, null);
                 }
             }
+        }
+
+        private static List<Chest> cachedOutdoorRootChests = null;
+        private static float cachedOutdoorRootChestsAt = -999f;
+
+        // The day-change phases (harvest -> ponds -> quarries) all need the same full-map
+        // chest collection within a ~2s kickoff window; scan the 1M-tile map once and share.
+        // Callers must NOT mutate the returned list. The short TTL means normal gameplay
+        // (where players add/remove chests) never sees a stale collection.
+        public static List<Chest> CollectOutdoorAutomationRootChestsShared(float maxAgeSeconds = 10f)
+        {
+            if (cachedOutdoorRootChests != null &&
+                Time.realtimeSinceStartup - cachedOutdoorRootChestsAt <= maxAgeSeconds)
+                return cachedOutdoorRootChests;
+
+            cachedOutdoorRootChests = CollectOutdoorAutomationRootChests();
+            cachedOutdoorRootChestsAt = Time.realtimeSinceStartup;
+            return cachedOutdoorRootChests;
         }
 
         public static List<Chest> CollectOutdoorAutomationRootChests()
@@ -5178,7 +5389,11 @@ namespace Autom8er
                     if (IsPartOfObject(nx, ny, end, inside))
                     {
                         effectiveEnd = neighbor;
-                        cameFrom[effectiveEnd] = current;
+                        // If the end tile is already tracked (e.g. the destination sits ON a
+                        // conveyor-type floor tile), it already has a valid chain to start.
+                        // Overwriting its parent here can create a cycle and hang reconstruction.
+                        if (!cameFrom.ContainsKey(effectiveEnd))
+                            cameFrom[effectiveEnd] = current;
                         foundEnd = true;
                         break;
                     }
@@ -5220,7 +5435,8 @@ namespace Autom8er
                         if (cameFrom.ContainsKey(convTile) && !(convTile.x == start.x && convTile.y == start.y))
                         {
                             effectiveEnd = adjTile;
-                            cameFrom[effectiveEnd] = convTile;
+                            if (!cameFrom.ContainsKey(effectiveEnd))
+                                cameFrom[effectiveEnd] = convTile;
                             foundEnd = true;
                             break;
                         }
@@ -5234,10 +5450,13 @@ namespace Autom8er
 
             List<Vector2Int> path = new List<Vector2Int>();
             Vector2Int step = effectiveEnd;
+            int reconstructGuard = 0;
             while (step.x != start.x || step.y != start.y)
             {
                 path.Add(step);
-                step = cameFrom[step];
+                // A corrupted/cyclic parent chain must degrade to "no path", never hang the main thread.
+                if (++reconstructGuard > maxTiles || !cameFrom.TryGetValue(step, out step))
+                    return null;
             }
             path.Add(start);
             path.Reverse();
@@ -5426,12 +5645,28 @@ namespace Autom8er
                 yield break;
 
             BeginDayChangeHarvestPhase();
+            // finally releases the harvest locks even if this coroutine is destroyed mid-run
+            // (exit to menu): a stale dayChangeVacuumHarvestRunning would suspend ALL farmer
+            // crates in the next loaded save until a full day-change run completes.
+            try
+            {
+                System.Collections.IEnumerator core = ProcessDayChangeVacuumHarvestsCore();
+                while (core.MoveNext())
+                    yield return core.Current;
+            }
+            finally
+            {
+                EndDayChangeHarvestPhase();
+            }
+        }
+
+        private static System.Collections.IEnumerator ProcessDayChangeVacuumHarvestsCore()
+        {
             ActivateAllVacuumCrates();
 
             List<Chest> chestsCopy = new List<Chest>(ContainerManager.manage.activeChests);
             if (chestsCopy.Count == 0)
             {
-                EndDayChangeHarvestPhase();
                 yield break;
             }
 
@@ -5635,8 +5870,6 @@ namespace Autom8er
             {
                 Plugin.Log.LogInfo("Autom8er: Vacuum crate day-change harvest collected " + harvested + " crop/tree tile(s).");
             }
-
-            EndDayChangeHarvestPhase();
         }
 
         public static bool IsOwnedByVacuumCrate(int xPos, int yPos, HouseDetails inside, TileObject tileObj, TileObjectGrowthStages growth)
@@ -5952,7 +6185,16 @@ namespace Autom8er
                             return;
                     }
 
-                    HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedMoveAmount);
+                    if (HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedMoveAmount))
+                        return;
+
+                    // Terminal fallback: any reachable chest, then a real networked ground
+                    // drop - a full network must never silently destroy a flushed chunk.
+                    if (!ConveyorHelper.FallbackDepositToAnyChest(capturedSourceChest.xPos, capturedSourceChest.yPos, inside, capturedItemId, capturedMoveAmount))
+                    {
+                        Vector3 crateWorld = new Vector3(capturedSourceChest.xPos * 2, WorldManager.Instance.heightMap[capturedSourceChest.xPos, capturedSourceChest.yPos], capturedSourceChest.yPos * 2);
+                        SpawnFallbackGroundDrop(capturedItemId, capturedMoveAmount, -1, crateWorld, inside);
+                    }
                 };
 
                 ConveyorAnimator.AnimateTransfer(capturedItemId, capturedMoveAmount,
@@ -6381,6 +6623,15 @@ namespace Autom8er
             pendingFarmActions.Clear();
             activeCrateUntil.Clear();
             farmerNetworkScaleCache.Clear();
+        }
+
+        // Full runtime-state reset for save/load (spec rule 12): pendingDrops holds Mirror
+        // netIds that collide across sessions, pendingFarmActions reference the old world's
+        // tiles, and a stale running flag suspends all farmer crates in the next save.
+        public static void ClearState()
+        {
+            ClearVisuals();
+            dayChangeVacuumHarvestRunning = false;
         }
 
         private static bool IsDropInSameSpace(DroppedItem drop, HouseDetails inside)
@@ -7277,12 +7528,12 @@ namespace Autom8er
 
         private static long GetFlushKey(Chest chest, int itemId)
         {
-            long chestKey = (((long)chest.xPos & 0xFFFFFL) << 44)
+            // Green crates are outdoor-only, so (xPos, yPos, itemId) identifies the buffer.
+            // Do NOT shift the packed key further: shifting xPos off the top of the long
+            // made all same-row crates share flush timers for the same item.
+            return (((long)chest.xPos & 0xFFFFFL) << 44)
                 | (((long)chest.yPos & 0xFFFFFL) << 24)
-                | (((long)(chest.insideX + 1) & 0xFFFL) << 12)
-                | ((long)(chest.insideY + 1) & 0xFFFL);
-
-            return (chestKey << 20) ^ (uint)itemId;
+                | (uint)itemId;
         }
 
         private static int GetTransferChunkSize(Chest chest, int itemId, int stackAmount)
@@ -7561,31 +7812,24 @@ namespace Autom8er
             if (newStatus < 0)
                 newStatus = 0;
 
-            HarvestHelper.CurrentHarvestInside = null;
-            HarvestHelper.CurrentHarvestForcedChest = owningChest;
+            // RpcHarvestObject defers harvest() past this call stack, so the forced chest
+            // must be handed off keyed by tile, not via the transient static.
+            HarvestHelper.SetForcedHarvestChestAt(xPos, yPos, owningChest);
 
-            try
+            AutomationCreditHelper.TryGrantHarvestMilestone(tileObj.tileObjectId);
+            AutomationCreditHelper.TryGrantGrowthHarvestCredit(tileObj.tileObjectId);
+
+            if (growth.diesOnHarvest)
             {
-                AutomationCreditHelper.TryGrantHarvestMilestone(tileObj.tileObjectId);
-                AutomationCreditHelper.TryGrantGrowthHarvestCredit(tileObj.tileObjectId);
-
-                if (growth.diesOnHarvest)
-                {
-                    NetworkMapSharer.Instance.RpcHarvestObject(-1, xPos, yPos, spawnDrop: true);
-                }
-                else
-                {
-                    NetworkMapSharer.Instance.RpcHarvestObject(newStatus, xPos, yPos, spawnDrop: true);
-                    WorldManager.Instance.onTileStatusMap[xPos, yPos] = newStatus;
-                }
-
-                WorldManager.Instance.onTileChunkHasChanged(xPos, yPos);
+                NetworkMapSharer.Instance.RpcHarvestObject(-1, xPos, yPos, spawnDrop: true);
             }
-            finally
+            else
             {
-                HarvestHelper.CurrentHarvestInside = null;
-                HarvestHelper.CurrentHarvestForcedChest = null;
+                NetworkMapSharer.Instance.RpcHarvestObject(newStatus, xPos, yPos, spawnDrop: true);
+                WorldManager.Instance.onTileStatusMap[xPos, yPos] = newStatus;
             }
+
+            WorldManager.Instance.onTileChunkHasChanged(xPos, yPos);
         }
 
         private static bool TryRemoveDropFromWorld(DroppedItem drop)
@@ -7623,15 +7867,13 @@ namespace Autom8er
 
         private static void SpawnFallbackGroundDrop(int itemId, int stackAmount, int tallyType, Vector3 chestWorld, HouseDetails inside)
         {
-            GameObject dropped = WorldManager.Instance.dropAnItem(itemId, stackAmount, chestWorld, inside, tryNotToStack: false);
-            if (dropped == null)
+            // Must go through spawnAServerDrop: it calls NetworkServer.Spawn after dropAnItem.
+            // A bare dropAnItem here creates the exact ghost-item bug documented in Rule 12
+            // (visible locally, netId 0, clients never see it, nobody can pick it up).
+            if (NetworkMapSharer.Instance == null)
                 return;
 
-            DroppedItem droppedItem = dropped.GetComponent<DroppedItem>();
-            if (droppedItem != null && tallyType > -1)
-            {
-                droppedItem.NetworkendOfDayTallyType = tallyType;
-            }
+            NetworkMapSharer.Instance.spawnAServerDrop(itemId, stackAmount, chestWorld, inside, tryNotToStack: false, xPType: tallyType);
         }
 
         private static void TriggerVacuumVisual(int tileX, int tileY, float duration)
@@ -7794,6 +8036,8 @@ namespace Autom8er
         public static void ClearBulkDistributionState()
         {
             bulkDistributionPlans.Clear();
+            activeCrateUntil.Clear();
+            networkWakeSpreadCooldownUntil.Clear();
         }
 
         public static bool IsPlayerInteracting(Chest chest)
@@ -7969,7 +8213,15 @@ namespace Autom8er
                     if (ConveyorHelper.FallbackDepositToAnyChest(capturedDestinationChest.xPos, capturedDestinationChest.yPos, inside, capturedItemId, capturedAmount))
                         return;
 
-                    HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedAmount);
+                    if (HarvestHelper.TryDepositHarvestToChest(capturedSourceChest, inside, capturedItemId, capturedAmount))
+                        return;
+
+                    // Source filled/removed mid-flight: networked ground drop beats silent loss.
+                    if (NetworkMapSharer.Instance != null && WorldManager.Instance != null)
+                    {
+                        Vector3 sourceWorld = new Vector3(capturedSourceChest.xPos * 2, WorldManager.Instance.heightMap[capturedSourceChest.xPos, capturedSourceChest.yPos], capturedSourceChest.yPos * 2);
+                        NetworkMapSharer.Instance.spawnAServerDrop(capturedItemId, capturedAmount, sourceWorld, inside);
+                    }
                 };
 
                 ConveyorAnimator.AnimateTransfer(capturedItemId, capturedAmount,
@@ -7981,6 +8233,21 @@ namespace Autom8er
                 ConveyorHelper.AdvanceFilterDistributionCursor(filterDestinations, itemId, inside);
                 return;
             }
+        }
+
+        private static bool IsAnyFilterDestination(Chest chest, List<ConveyorHelper.OutputDestination> filterDestinations)
+        {
+            if (filterDestinations == null)
+                return false;
+
+            for (int i = 0; i < filterDestinations.Count; i++)
+            {
+                ConveyorHelper.OutputDestination dest = filterDestinations[i];
+                if (dest != null && dest.chest != null &&
+                    dest.chest.xPos == chest.xPos && dest.chest.yPos == chest.yPos)
+                    return true;
+            }
+            return false;
         }
 
         private static SourcePull FindSourcePull(Chest filterChest, HouseDetails inside, int itemId, ConveyorHelper.OutputDestination destination, List<ConveyorHelper.OutputDestination> filterDestinations)
@@ -8034,6 +8301,17 @@ namespace Autom8er
                     if (destination != null && destination.chest != null &&
                         chest.xPos == destination.chest.xPos &&
                         chest.yPos == destination.chest.yPos)
+                        continue;
+
+                    // Never pull from ANY sibling filter's destination chest - two same-item
+                    // filters stealing from each other's storage ping-pongs items forever.
+                    if (IsAnyFilterDestination(chest, filterDestinations))
+                        continue;
+
+                    // Never pull from a chest touching this filter crate: any of its up-to-4
+                    // touching chests can become its destination once the current one fills,
+                    // and shuttling between its own touching chests never ends.
+                    if (Mathf.Abs(chest.xPos - filterChest.xPos) + Mathf.Abs(chest.yPos - filterChest.yPos) == 1)
                         continue;
 
                     if (ConveyorHelper.IsOutputOnlyContainer(checkX, checkY, inside) ||
@@ -8708,6 +8986,12 @@ namespace Autom8er
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
 
+        // Scratch buffers reused every scan pass (main-thread only): per-chest-per-tick
+        // allocations here were a top source of GC hitches on large bases.
+        private static readonly HashSet<long> scratchChecked = new HashSet<long>();
+        private static readonly HashSet<long> scratchVisited = new HashSet<long>();
+        private static readonly Queue<(int x, int y)> scratchQueue = new Queue<(int x, int y)>();
+
         // Try to load bait from chest into nearby crab pots (within 2-tile radius or via conveyor)
         public static void TryLoadBaitIntoCrabPots(Chest sourceChest, HouseDetails inside)
         {
@@ -8715,7 +8999,8 @@ namespace Autom8er
             if (inside != null)
                 return;
 
-            HashSet<long> checkedPositions = new HashSet<long>();
+            scratchChecked.Clear();
+            HashSet<long> checkedPositions = scratchChecked;
 
             // Check 2-tile radius around chest for crab pots
             if (TryLoadBaitInRadius(sourceChest, sourceChest.xPos, sourceChest.yPos, checkedPositions))
@@ -8765,8 +9050,10 @@ namespace Autom8er
             if (Plugin.ConveyorTileType < 0)
                 return;
 
-            HashSet<long> visitedConveyors = new HashSet<long>();
-            Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
+            scratchVisited.Clear();
+            scratchQueue.Clear();
+            HashSet<long> visitedConveyors = scratchVisited;
+            Queue<(int x, int y)> queue = scratchQueue;
 
             // Start by checking adjacent conveyor tiles from chest
             for (int i = 0; i < 4; i++)
@@ -8918,9 +9205,15 @@ namespace Autom8er
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
 
+        // Scratch buffers reused every scan pass (main-thread only)
+        private static readonly HashSet<long> scratchChecked = new HashSet<long>();
+        private static readonly HashSet<long> scratchVisited = new HashSet<long>();
+        private static readonly Queue<(int x, int y)> scratchQueue = new Queue<(int x, int y)>();
+
         public static void TryLoadItemsIntoGrowthStages(Chest sourceChest, HouseDetails inside)
         {
-            HashSet<long> checkedPositions = new HashSet<long>();
+            scratchChecked.Clear();
+            HashSet<long> checkedPositions = scratchChecked;
 
             // Check 1-tile radius around chest
             if (TryLoadInRadius(sourceChest, sourceChest.xPos, sourceChest.yPos, inside, checkedPositions))
@@ -8960,8 +9253,10 @@ namespace Autom8er
             if (Plugin.ConveyorTileType < 0)
                 return;
 
-            HashSet<long> visitedConveyors = new HashSet<long>();
-            Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
+            scratchVisited.Clear();
+            scratchQueue.Clear();
+            HashSet<long> visitedConveyors = scratchVisited;
+            Queue<(int x, int y)> queue = scratchQueue;
 
             for (int i = 0; i < 4; i++)
             {
@@ -9080,10 +9375,12 @@ namespace Autom8er
                     continue;
 
                 int remaining = stack - 1;
+                // Passing null here for an indoor chest would let changeSlotInChest match a
+                // same-coordinate chest in a DIFFERENT house (house==null matches everything).
                 if (remaining <= 0)
-                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, -1, 0, null);
+                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, -1, 0, inside);
                 else
-                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, itemId, remaining, null);
+                    ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, itemId, remaining, inside);
 
                 ConveyorAnimator.ReserveTarget(targetX, targetY);
 
@@ -9099,12 +9396,15 @@ namespace Autom8er
                     if (capturedInside != null)
                     {
                         capturedInside.houseMapOnTileStatus[capturedTargetX, capturedTargetY] = newStatus;
+                        // The plain RPC writes the WORLD map on clients - indoor targets must
+                        // use the Inside variant or clients corrupt tiles near the map origin.
+                        NetworkMapSharer.Instance.RpcGiveOnTileStatusInside(newStatus, capturedTargetX, capturedTargetY, capturedInside.xPos, capturedInside.yPos);
                     }
                     else
                     {
                         WorldManager.Instance.onTileStatusMap[capturedTargetX, capturedTargetY] = newStatus;
+                        NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedTargetX, capturedTargetY);
                     }
-                    NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedTargetX, capturedTargetY);
                     ConveyorAnimator.UnreserveTarget(capturedTargetX, capturedTargetY);
                 };
 
@@ -9125,6 +9425,11 @@ namespace Autom8er
         private static readonly int[] dx = { -1, 0, 1, 0 };
         private static readonly int[] dy = { 0, -1, 0, 1 };
 
+        // Scratch buffers reused every scan pass (main-thread only)
+        private static readonly HashSet<long> scratchChecked = new HashSet<long>();
+        private static readonly HashSet<long> scratchVisited = new HashSet<long>();
+        private static readonly Queue<(int x, int y)> scratchQueue = new Queue<(int x, int y)>();
+
         // Try to load animal feed from chest into nearby silos (within 1-tile radius or via conveyor)
         // Loads one item per tick for visual fill effect
         public static void TryLoadFeedIntoSilos(Chest sourceChest, HouseDetails inside)
@@ -9133,7 +9438,22 @@ namespace Autom8er
             if (inside != null)
                 return;
 
-            HashSet<long> checkedPositions = new HashSet<long>();
+            // Cheap pre-filter: silos only ever take Animal Food (344), so a chest without
+            // it can skip the radius and conveyor scans entirely.
+            bool hasFeed = false;
+            for (int slot = 0; slot < sourceChest.itemIds.Length; slot++)
+            {
+                if (sourceChest.itemIds[slot] == 344 && sourceChest.itemStacks[slot] > 0)
+                {
+                    hasFeed = true;
+                    break;
+                }
+            }
+            if (!hasFeed)
+                return;
+
+            scratchChecked.Clear();
+            HashSet<long> checkedPositions = scratchChecked;
 
             // Check 1-tile radius around chest for silos (silos are on land, not in water)
             if (TryLoadFeedInRadius(sourceChest, sourceChest.xPos, sourceChest.yPos, checkedPositions))
@@ -9174,8 +9494,10 @@ namespace Autom8er
             if (Plugin.ConveyorTileType < 0)
                 return;
 
-            HashSet<long> visitedConveyors = new HashSet<long>();
-            Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
+            scratchVisited.Clear();
+            scratchQueue.Clear();
+            HashSet<long> visitedConveyors = scratchVisited;
+            Queue<(int x, int y)> queue = scratchQueue;
 
             // Start by checking adjacent conveyor tiles from chest
             for (int i = 0; i < 4; i++)
@@ -9364,17 +9686,47 @@ namespace Autom8er
         private static readonly int[] dy = { 0, -1, 0, 1 };
         private const int SearchRadius = 3;
 
+        // Scratch buffers reused every scan pass (main-thread only)
+        private static readonly HashSet<long> scratchChecked = new HashSet<long>();
+        private static readonly HashSet<long> scratchVisited = new HashSet<long>();
+        private static readonly Queue<(int x, int y)> scratchQueue = new Queue<(int x, int y)>();
+
         public static void TryFeedPondsAndTerrariums(Chest sourceChest, HouseDetails inside)
         {
             if (inside != null)
                 return;
 
-            HashSet<long> checkedPositions = new HashSet<long>();
+            // Cheap pre-filter: 24 slot reads beat the 24-tile diamond + conveyor BFS below,
+            // and most chests hold no pond food at all.
+            if (!ChestHasAnyPondFood(sourceChest))
+                return;
+
+            scratchChecked.Clear();
+            HashSet<long> checkedPositions = scratchChecked;
 
             if (TryFeedInRadius(sourceChest, sourceChest.xPos, sourceChest.yPos, checkedPositions))
                 return;
 
             TryFeedViaConveyorPath(sourceChest, checkedPositions);
+        }
+
+        private static bool ChestHasAnyPondFood(Chest sourceChest)
+        {
+            int honeyId = ContainerManager.manage.fishPondManager.honeyItem.getItemId();
+            for (int slot = 0; slot < sourceChest.itemIds.Length; slot++)
+            {
+                int itemId = sourceChest.itemIds[slot];
+                if (itemId < 0 || sourceChest.itemStacks[slot] <= 0)
+                    continue;
+
+                if (itemId == honeyId)
+                    return true;
+
+                InventoryItem item = Inventory.Instance.allItems[itemId];
+                if (item != null && (bool)item.underwaterCreature)
+                    return true;
+            }
+            return false;
         }
 
         private static bool TryFeedInRadius(Chest sourceChest, int centerX, int centerY, HashSet<long> checkedPositions)
@@ -9417,8 +9769,10 @@ namespace Autom8er
 
             int mapW = WorldManager.Instance.onTileMap.GetLength(0);
             int mapH = WorldManager.Instance.onTileMap.GetLength(1);
-            HashSet<long> visitedConveyors = new HashSet<long>();
-            Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
+            scratchVisited.Clear();
+            scratchQueue.Clear();
+            HashSet<long> visitedConveyors = scratchVisited;
+            Queue<(int x, int y)> queue = scratchQueue;
 
             for (int i = 0; i < 4; i++)
             {
@@ -9567,10 +9921,24 @@ namespace Autom8er
                 int capturedPondX = pondX;
                 int capturedPondY = pondY;
                 int capturedItemId = itemId;
+                int capturedSourceX = sourceChest.xPos;
+                int capturedSourceY = sourceChest.yPos;
                 System.Action depositFood = () =>
                 {
-                    ContainerManager.manage.changeSlotInChest(capturedPondX, capturedPondY, 22, capturedItemId, 1, null);
-                    ConveyorAnimator.UnreserveTarget(capturedPondX, capturedPondY);
+                    try
+                    {
+                        // Re-check on arrival: a player may have loaded food manually during
+                        // the animation, and overwriting slot 22 would destroy their item.
+                        Chest pondChest = ContainerManager.manage.getChestForWindow(capturedPondX, capturedPondY, null);
+                        if (pondChest == null || pondChest.itemIds[22] == -1)
+                            ContainerManager.manage.changeSlotInChest(capturedPondX, capturedPondY, 22, capturedItemId, 1, null);
+                        else
+                            ConveyorHelper.FallbackDepositToAnyChestLegacy(capturedSourceX, capturedSourceY, null, capturedItemId, 1);
+                    }
+                    finally
+                    {
+                        ConveyorAnimator.UnreserveTarget(capturedPondX, capturedPondY);
+                    }
                 };
 
                 ConveyorAnimator.AnimateTransfer(itemId, 1,
@@ -9594,7 +9962,7 @@ namespace Autom8er
             HarvestHelper.ResetDayChangeAnimationStagger();
 
             HashSet<long> checkedPonds = new HashSet<long>();
-            List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChests();
+            List<Chest> chestsCopy = ConveyorHelper.CollectOutdoorAutomationRootChestsShared();
             int extractedCount = 0;
 
             foreach (Chest chest in chestsCopy)
@@ -9647,8 +10015,10 @@ namespace Autom8er
 
             int mapW = WorldManager.Instance.onTileMap.GetLength(0);
             int mapH = WorldManager.Instance.onTileMap.GetLength(1);
-            HashSet<long> visitedConveyors = new HashSet<long>();
-            Queue<(int x, int y)> queue = new Queue<(int x, int y)>();
+            scratchVisited.Clear();
+            scratchQueue.Clear();
+            HashSet<long> visitedConveyors = scratchVisited;
+            Queue<(int x, int y)> queue = scratchQueue;
             int extractedCount = 0;
 
             for (int i = 0; i < 4; i++)
@@ -9804,14 +10174,31 @@ namespace Autom8er
             Chest capturedChest = depositDestination.chest;
             int capturedRouteX = depositDestination.routeX;
             int capturedRouteY = depositDestination.routeY;
+            int capturedRootX = rootX;
+            int capturedRootY = rootY;
             System.Action depositOutput = () =>
             {
                 if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, null, capturedOutputId, capturedExtract,
                     () => AutomationCreditHelper.TryGrantOutputCredit(tileObjectId, capturedOutputId, capturedExtract)))
                 {
                     // Chest full on arrival — try any reachable chest
-                    ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, null, capturedOutputId, capturedExtract,
-                        () => AutomationCreditHelper.TryGrantOutputCredit(tileObjectId, capturedOutputId, capturedExtract));
+                    if (!ConveyorHelper.FallbackDepositToAnyChest(capturedChest.xPos, capturedChest.yPos, null, capturedOutputId, capturedExtract,
+                        () => AutomationCreditHelper.TryGrantOutputCredit(tileObjectId, capturedOutputId, capturedExtract)))
+                    {
+                        // Everything full: put the output back on pond slot 23 instead of
+                        // destroying it. Add onto whatever the pond produced meanwhile.
+                        Chest livePond = ContainerManager.manage.getChestForWindow(capturedRootX, capturedRootY, null);
+                        int liveStack = (livePond != null && livePond.itemIds[23] == capturedOutputId) ? livePond.itemStacks[23] : 0;
+                        if (livePond == null || livePond.itemIds[23] == -1 || livePond.itemIds[23] == capturedOutputId)
+                        {
+                            ContainerManager.manage.changeSlotInChest(capturedRootX, capturedRootY, 23, capturedOutputId, liveStack + capturedExtract, null);
+                            Plugin.LogWarningThrottled("pond-extract-returned", "Autom8er: No storage available, returned output to pond/terrarium.");
+                        }
+                        else
+                        {
+                            Plugin.LogWarningThrottled("pond-extract-lost", "Autom8er: No storage available and pond output slot occupied, items lost.");
+                        }
+                    }
                 }
             };
 
