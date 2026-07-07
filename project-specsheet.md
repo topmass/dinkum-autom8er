@@ -1,7 +1,7 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** 1.7.0
+**Version:** 1.7.1
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
@@ -21,13 +21,18 @@
 10. **Fish Pond Automation** - Auto-feed critters from adjacent chests, extract roe on day change (3-tile radius)
 11. **Bug Terrarium Automation** - Auto-feed honey from adjacent chests, extract cocoons on day change (3-tile radius)
 12. **Auto Sorter Integration** - Auto Sorters work as automation I/O chests, exempt from KeepOneItem, fire items on deposit
-13. **Auto Placer Support** - Auto Placers function as standard automation chests
+13. **Auto Placer Support** - Auto Placers can feed automation but are special containers: they never receive machine outputs
 14. **Stackable Critters** - All underwater creatures become stackable (configurable, default on)
 15. **Quarry Auto-Harvest** - Vanilla quarry day-change nodes can be auto-harvested into Autom8er chest/conveyor networks
 16. **Green Crates = VacuFarm Crates** - Green crates harvest/vacuum nearby farm outputs, can till/fertilize/plant, and pass outputs into the connected network
 17. **Black Crates = Filter Crates** - Black crates hold sample items and route matching network items into a touching storage chest or green VacuFarm crate
-18. **Unlimited Shop Stall Rebuy** - Real shop stall stock stays buyable after purchase instead of marking sold out for the day
+18. **Unlimited Shop Stall Rebuy** - Real shop stall stock stays buyable after purchase (config `InfiniteToolRebuy`, **default OFF** since 1.7.1)
 19. **Green Crate Range Guide** - Holding a green crate previews its `21 x 21` farm range, and Tape Measure toggles that same range guide on placed green crates
+20. **Free Chest/Crate Painting** - Painting any chest-type tile object does not consume the paint can (config `FreeChestCratePainting`, default on; vehicle painting unchanged)
+21. **Franklin Repeat Orders** - Multiple craftsman orders per day; mail delivery unaffected (config `InfiniteFranklinOrdering`, default on)
+22. **Water Tank Sprinklers** - Plain sprinklers water their area if a green crate within the 21x21 farm range holds a Water Tank item (692); server-only patch
+23. **Black Crates Invisible To Crafting** - Crafting and advanced cooking tables neither count nor consume black filter crate contents when crafting from nearby chests
+24. **Guest Conveyor Animation Sync** (dev, unreleased) - Modded multiplayer guests see belt animations; render-only, host still owns all item movement
 
 ### Large Array Defaults
 - Shared Auto Farmer pacing defaults: `4` active farmer crates per step, `2` farm actions or harvest tiles per active crate, `0.1s` realtime pause between day-change harvest steps
@@ -44,13 +49,15 @@ Rules:
 3. New black-crate behavior should wake through `FilterCrateHelper.MarkRouteActive(...)` or player interaction, not by lowering idle polling for every filter crate.
 4. Prefer one grouped transfer per scheduled pass. Do not enqueue one animation, deposit callback, or conveyor transfer per individual item when a stack/group can represent the same result.
 5. Large harvest or logging-style systems must batch their actual work, not just their visuals. Use coarse waves, per-step limits, and realtime waits like the day-change Auto Farmer path.
-6. Green crates must keep Auto Farmer inputs locally: hoes, shovels, fertilizer, crop seeds, and valid tree-planting items should not be flushed as generic outputs.
+6. Green crates must keep Auto Farmer inputs locally: hoes, shovels, fertilizer (275), Season-All (1367), Insta-Grow (1671), Water Tanks (692), crop seeds, and valid tree-planting items should not be flushed as generic outputs.
 7. Green crates are not generic storage destinations. Generic machine output, harvest output, and fallback destination searches must continue to skip green crates unless a black filter route explicitly targets one.
 8. Filter crates are routing heads, not storage. Keep sample items in the black crate and move real bulk into the touching destination chest or explicitly routed green crate.
 9. Round-robin splitters must collect the full matching destination group, sort it into a stable order, and use the shared cursor. Do not create feature-local splitter state unless it is temporary and cleared on save/load.
 10. Temporary equalization is only for large stackable manual dumps from normal source chests. Live drip-fed machine traffic should stay on normal round-robin.
 11. If a new feature can create many item events, make the event producer respect the same scheduler and chunking rules before animation spawn. Do not add per-frame visual culling to hide overload after creating it.
 12. Any new runtime caches, cursors, reservations, or quota plans must be cleared in the save/load cleanup path if stale state could affect a later session.
+13. **Day-change window:** sleeping shows a ~15-20 second black-screen/summary sequence. Heavy day-change work (harvest kickoffs, full-map scans, staggered waves) is deliberately scheduled inside that window because players cannot see spikes there. Keep staggering within the window, never move that work into normal gameplay time, and do not add fine-grained coroutine slicing to "fix" spikes the window already hides.
+14. **Real-time world changes:** players place, break, and move chests and conveyors all day, and may demolish a whole network at once. Any cached network topology or cached "no work here" verdict MUST be invalidated immediately when the world changes - a system must never act on a stale network (e.g. a filter pull along conveyors the player just deleted). Any future topology cache also needs a config kill-switch back to live scanning.
 
 ### Green Crate Tree Mode
 - If a green crate contains a shovel and buried tree/fruit items, tree planting uses a dedicated layout pass that is separate from crop tilling/fertilizing/seed planting.
@@ -117,22 +124,29 @@ if (onTileMap[x, y] < -1)
 
 ## Code Structure
 
-### Plugin.cs Layout (~8300 lines)
+### Plugin.cs Layout (~9900 lines)
 ```
 Autom8er namespace
 ├── Plugin : BaseUnityPlugin
 │   ├── Config: ConveyorTileItemId, KeepOneItem, ScanInterval, SiloFillSpeed,
 │   │          AutoFeedPonds, HoldOutputForBreeding, AnimationEnabled, AnimationSpeed,
-│   │          StackableCritters
+│   │          StackableCritters, InfiniteToolRebuy, InfiniteFranklinOrdering,
+│   │          FreeChestCratePainting
 │   ├── Constants: WHITE_CRATE_TILE_ID (417), WHITE_CHEST_TILE_ID (430),
 │   │          BLACK_CRATE_TILE_ID (410), GREEN_CRATE_TILE_ID (412),
-│   │          BLAST_FURNACE_TILE_ID (581), shared farmer pacing defaults,
+│   │          BLAST_FURNACE_TILE_ID (581), WATER_TANK_ITEM_ID (692),
+│   │          shared farmer pacing defaults,
 │   │          active/idle scheduler intervals and per-pass caps
 │   ├── Awake() - Init config, apply Harmony patches
-│   ├── Update() - AutoFarmerRangeGuide.Update() + ConveyorAnimator.UpdateAnimations() + scan timer + ProcessAllChests
-│   ├── OnDestroy() - AutoFarmerRangeGuide.ClearAll() + ConveyorAnimator.ClearAllAnimations() + harmony.UnpatchSelf()
+│   ├── Update() - AutoFarmerRangeGuide.Update() + ConveyorNetSync.ClientUpdate(),
+│   │          then HOST-ONLY (returns unless NetworkServer.active): conveyor tile caching,
+│   │          stackability overrides, ConveyorNetSync.ServerUpdate(),
+│   │          ConveyorAnimator.UpdateAnimations() + VacuumCrateHelper.UpdateVisuals(),
+│   │          scan timer → ProcessAllChests, load catch-up queuing
+│   ├── OnDestroy() - AutoFarmerRangeGuide.ClearAll() + ConveyorAnimator.ClearAllAnimations() + VacuumCrateHelper.ClearVisuals() + harmony.UnpatchSelf()
+│   ├── CanRunServerAutomation() - NetworkServer.active + isServer gate used by transfer helpers
 │   ├── CacheConveyorTileType() - Get placeableTileType from item data
-│   ├── ApplyStackableCritters() - One-time: sets isStackable=true on all underwaterCreature items
+│   ├── ApplyStackabilityOverrides() - One-time: sets isStackable=true on all underwaterCreature items (+ turf roll)
 │   ├── ProcessAllChests() - Main loop
 │   │   ├── Separates black crates, green crates, and standard chests first
 │   │   ├── ProcessScheduledVacuumCrates() - Round-robin green-crate scheduler
@@ -151,10 +165,69 @@ Autom8er namespace
 ├── ShopManagerUnlimitedStockPatch [HarmonyPatch]
 │   └── Prefix on ShopManager.sellStall()
 │       - Prevents real shop stalls from marking sold out after purchase
+│       - No-op unless InfiniteToolRebuy=true (default false)
 │
 ├── ShopBuyDropUnlimitedStockPatch [HarmonyPatch]
 │   └── Prefix on ShopBuyDrop.sold(bool)
 │       - Skips sold-out behavior for real shop stalls so tools/seeds stay rebuyable
+│       - No-op unless InfiniteToolRebuy=true (default false)
+│
+├── CraftingTableBlackCrateAmountPatch [HarmonyPatch]
+│   └── Prefix on ContainerManager.GetAmountOfItemsInChestForTable()
+│       - Returns 0 for black filter crates so crafting/cooking tables never count their samples
+│       - House context mirrors vanilla (localChar.myInteract.InsideHouseDetails)
+│
+├── CraftingTableBlackCrateRemovePatch [HarmonyPatch]
+│   └── Prefix on ContainerManager.RemoveAmountOfItemsInChestForTable()
+│       - Skips removal from black filter crates (belt-and-braces with the Amount patch)
+│
+├── FranklinRepeatBuyPatch [HarmonyPatch]
+│   └── Prefix/Postfix on GiveNPC.tryToBuy()
+│       - Recreates Craft Workshop display stock after a successful purchase (InfiniteFranklinOrdering)
+│
+├── FranklinRepeatOrderPatch [HarmonyPatch]
+│   └── Prefix on CharMovement.UserCode_CmdAgreeToCraftsmanCrafting()
+│       - Blocks the craftsmanWorking busy flag; the order letter is queued independently so
+│         mail delivery still works and multiple orders per day stack as separate letters
+│
+├── FreeChestCratePaintingMarkPatch [HarmonyPatch]
+│   └── Prefix on CharPickUp.CmdChangeTileVariation() (client-side Mirror stub)
+│       - Marks the next consumeItemInHand as skippable when painting a tileObjectChest target
+│       - Runs on the painter's own machine; game calls Cmd then consume on consecutive lines
+│
+├── FreeChestCratePaintingConsumePatch [HarmonyPatch]
+│   └── Prefix on Inventory.consumeItemInHand()
+│       - Skips paint can consumption when the mark patch flagged a chest/crate paint
+│
+├── VacuumCrateCloseWakePatch [HarmonyPatch]
+│   └── Prefix on ChestWindow.closeChestInWindow()
+│       - Wakes a green crate when its window closes (host player only; remote closes don't reach the host)
+│
+├── AutoFarmerWaterTankSprinklerPatch [HarmonyPatch]
+│   └── Postfix on SprinklerTile.waterTiles()
+│       - Server-only (vanilla runs this symmetrically on all machines, but the check reads
+│         chest contents only the host knows; clients sync via sprinkerContinuesToWater RPCs)
+│       - Waters a plain sprinkler if a green crate within 21x21 holds a Water Tank (item 692)
+│
+├── ConveyorNetSync (static class) + ConveyorNetSyncBeaconPatch [HarmonyPatch]
+│   └── Multiplayer conveyor animation sync for MODDED guests (render-only; host owns all item movement)
+│       - CRITICAL: this game's Mirror build DISCONNECTS a peer that receives an unknown
+│         message id, so neither side may blind-send custom messages
+│       - Handshake: host repeats a harmless vanilla RPC beacon (RpcFeedFishSound at magic
+│         far-away position) → modded guest sees it (beacon patch) → guest sends Hello →
+│         host marks connection modded and replies Welcome with the HOST's conveyor tile type
+│       - Only marked connections receive Autom8erConveyorAnimMessage; guest re-runs FindPath
+│         over the synced tile map and renders the same visual with a no-op callback
+│       - Custom NetworkMessage structs need manual Writer<T>.write / Reader<T>.read assignment
+│         (mod DLLs are not Mirror-weaved)
+│       - Indoor animations are NOT broadcast (house-local coords would render at wrong world tiles)
+│
+├── AutomationCreditHelper (static class)
+│   └── Grants player progression credit on successful automated deposits (see Learnings)
+│
+├── HarvestPatch [HarmonyPatch]
+│   └── Prefix on TileObjectGrowthStages.harvest()
+│       - Intercepts manual + automated harvests near chests/networks and routes drops to storage
 │
 ├── AutoFarmerRangeGuide (static class)
 │   ├── Update() - While holding a green crate, draws the effective `21 x 21` farm range on the selected tile
@@ -509,6 +582,7 @@ Large bee hive / key cutter / worm farm / crab pot / pond / terrarium setups can
    - **< 5 creatures AND HoldOutputForBreeding:** Only extract above 15 roe
    - **HoldOutputForBreeding disabled:** Extract ALL
 4. Animated transfer from pond to chest; FallbackDepositToAnyChest if dest full on arrival
+5. A shared `checkedPonds` set per extraction run prevents two chests from double-extracting the same pond. If a chest claims a pond but its network has NO valid destination, the claim is released so a later chest in the same scan can still extract that day (destination failure is chest-specific, not pond-intrinsic)
 
 ### Bug Terrarium Automation
 Same architecture as fish ponds but:
@@ -613,7 +687,7 @@ Same architecture as fish ponds but:
 - This keeps mixed-item orchard or farm harvests from flooding the belt with same-frame bursts while still scaling better on large fields
 
 ### Stackable Critters (v1.5.0)
-On first `Update()` tick, `ApplyStackableCritters()` iterates all `Inventory.Instance.allItems` and sets `isStackable = true` on any item with `underwaterCreature` set. This directly modifies the item data — no Harmony patch needed. Works everywhere including the 2 places in `Inventory.cs` that check the `isStackable` field directly (UI stacking logic). Config `StackableCritters = false` skips the modification entirely (vanilla behavior). Fish pond feeding is unaffected — our code already takes exactly 1 critter per feeding cycle regardless of stack size.
+On first `Update()` tick, `ApplyStackabilityOverrides()` iterates all `Inventory.Instance.allItems` and sets `isStackable = true` on any item with `underwaterCreature` set. This directly modifies the item data — no Harmony patch needed. Works everywhere including the 2 places in `Inventory.cs` that check the `isStackable` field directly (UI stacking logic). Config `StackableCritters = false` skips the modification entirely (vanilla behavior). Fish pond feeding is unaffected — our code already takes exactly 1 critter per feeding cycle regardless of stack size.
 
 ---
 
@@ -636,6 +710,9 @@ BepInEx/config/topmass.autom8er.cfg
 | `AnimationEnabled` | Conveyor Animation | true | true/false | Show items visually moving along conveyors. Disable for instant transfers |
 | `AnimationSpeed` | Conveyor Animation | 2 | 0.5-10 | Speed of conveyor animations in tiles per second |
 | `StackableCritters` | Quality of Life | true | true/false | Make all critters stackable in inventory and chests |
+| `FreeChestCratePainting` | Quality of Life | true | true/false | Painting chests/crates doesn't consume the paint can (vehicle painting unchanged) |
+| `InfiniteFranklinOrdering` | Quality of Life | true | true/false | Order more than one craft from Franklin per day |
+| `InfiniteToolRebuy` | Quality of Life | false | true/false | Shop stall stock stays buyable after purchase (was always-on in 1.7.0) |
 
 ### Runtime Tile Type Caching
 ```csharp
@@ -682,7 +759,7 @@ When iterating `ContainerManager.manage.activeChests`, operations that modify ch
 In `ProcessAllChests()`, fish pond feeding MUST happen before `TryFeedAdjacentMachine()`. Critters (underwater creatures) have `itemChange` set on them, which means the machine-feeding code would try to deposit them into furnaces/grinders. By feeding ponds first, critters get consumed for their intended purpose.
 
 ### 8. Auto Sorters Are Exempt from KeepOneItem
-All 6 KeepOneItem check locations use `!IsAutoSorter(chest)` to exempt Auto Sorters. This is essential because Auto Sorters are intermediary — they need to fully empty to fire items to their final destinations.
+All 6 KeepOneItem check locations use `!IsAutoSorter(chest)` to exempt Auto Sorters. This is essential because Auto Sorters are intermediary — they need to fully empty to fire items to their final destinations. NOTE: the exemption is ALSO centralized in `Plugin.GetTransferableAmountFromChest()` — an edit sweep guided by "6 locations" must include that shared helper.
 
 ### 9. Filter tileObjectItemChanger in FindChestAt
 `FindChestAt()` skips any TileObject that has `tileObjectItemChanger != null`. This prevents ghost chest creation from machines like gacha machines that have `tileObjectChest` but are not legitimate storage containers.
@@ -698,6 +775,15 @@ Never use `WorldManager.Instance.dropAnItem()` in animation callbacks — it cre
 
 ### 13. activeChests Is Lazily Populated
 `ContainerManager.manage.activeChests` is NOT pre-populated on game load. Chests are only added when explicitly loaded via `getChestForRecycling()` or `getChestSaveOrCreateNewOne()`. On first game load, many chests exist in save data but aren't in `activeChests` until something touches them. Any code that iterates `activeChests` to find targets (like `AutoSortItemsIntoNearbyChests`) will find nothing if destination chests haven't been activated yet. Use `EnsureNearbyChestsActive()` pattern to pre-load chests from save data before scanning.
+
+### 14. Automation Is HOST-ONLY (Multiplayer)
+All item movement runs only on the host: `Plugin.Update()` returns unless `NetworkServer.active`, and the transfer helpers double-check `Plugin.CanRunServerAutomation()`. Guests never move items — they receive chest changes through the game's own `changeSlotInChest` → `RpcRefreshOpenedChest` networking, and (if modded) render belt animations via `ConveyorNetSync`. A guest's config (including `ConveyorTileItemId`) is ignored while they are a guest; the host's config decides all routing. Never add client-side code that mutates chests, tiles, or drops.
+
+### 15. This Mirror Build DISCONNECTS On Unknown Message IDs
+`NetworkServer`/`NetworkClient.UnpackAndInvoke` returns false for an unregistered message id and the caller disconnects the connection. NEVER blind-send a custom Mirror message — an unmodded or older peer would be kicked. `ConveyorNetSync`'s ordering is load-bearing: vanilla-RPC beacon first (proves the host is modded), guest Hello second (proves the guest is modded), custom traffic only to confirmed connections. Custom `NetworkMessage` structs in a mod DLL also need manual `Writer<T>.write`/`Reader<T>.read` assignment because mod assemblies are not Mirror-weaved.
+
+### 16. Vehicles Are Never Vacuumed
+Green crates must skip any drop whose item has `spawnPlaceable` with a `Vehicle` component (`IsVehicleItem`). Vehicle drops encode their paint variation in `stackAmount`, so vacuuming one turns "variation 3" into a stack of 3 vehicles (dupe). `TryVacuumNearbyDrops` is the single place that iterates `itemsOnGround`; keep the guard there if that ever changes.
 
 ---
 
@@ -734,7 +820,7 @@ From `Dinkum_Data/Managed/`:
 
 ### Build Command
 ```bash
-cd /home/matthew/Code/dinkum-mods/Autom8er && dotnet build code/Autom8er.csproj -c Release
+cd /home/topmass/Code/dinkum-mods/Autom8er && dotnet build code/Autom8er.csproj -c Release
 ```
 
 ### Output
@@ -748,7 +834,7 @@ code/bin/Release/net472/topmass.autom8er.dll
 cp code/bin/Release/net472/topmass.autom8er.dll mod/
 
 # Game plugins
-cp code/bin/Release/net472/topmass.autom8er.dll /home/matthew/.local/share/Steam/steamapps/common/Dinkum/BepInEx/plugins/
+cp code/bin/Release/net472/topmass.autom8er.dll /home/topmass/.local/share/Steam/steamapps/common/Dinkum/BepInEx/plugins/
 ```
 
 ---
@@ -866,6 +952,9 @@ If animals aren't spawning from incubators near conveyors, check that `spawnsFar
 ---
 
 ## Version History
+NOTE: the Nexus changelog (top of `bbcode-description.md`, mirroring the live page) is the authoritative RELEASE history — Nexus shipped quarry/filter/AutoFarmer crates in v1.6.0 and shop-stall rebuy + crate schedulers in v1.7.0. Entries below are development milestones and may group work differently.
+
+- **1.7.1** - Bugfix + QoL release. Multiplayer: all automation is host-only (`CanRunServerAutomation` gating) so guests no longer desync chest contents. Fish ponds/terrariums excluded as automation source chests (neighbor-stealing fix) and pond claims release when a chest has no valid destination. Crafting/advanced cooking tables no longer count or consume black filter crate samples. Green crates no longer vacuum vehicle drops (variation-in-stackAmount dupe fix). New QoL: free chest/crate painting (default on), Franklin repeat orders (default on), water-tank-in-green-crate sprinklers, Season-All (tiles 43/44) + Insta-Grow farmer support, green crate wake-on-window-close. BEHAVIOR CHANGE: shop stall rebuy now behind `InfiniteToolRebuy`, default OFF. Post-release dev: guest conveyor animation sync (`ConveyorNetSync`).
 - **1.7.0** - Green Auto Farmer crates harvest farm crops and natural foraging plants like bush lime style fruit/shrub outputs, vacuum nearby drops, till/fertilize/plant farm tiles, and route outputs back into conveyor networks. Farm crops stay on the dedicated Auto Farmer day-change harvest path. Natural foraging plants use the same vanilla `RpcHarvestObject(...)` / `TileObjectGrowthStages.harvest(...)` chain that manual right-click harvest uses, but when a green crate owns the tile their output is forced into that green crate. Black crates act as filter heads with touching storage chests or green Auto Farmer crates, support durability-item filter keys, round-robin split matching items across same-item filter groups, and reuse normal belt cadence for active pulls. Large manual stack dumps from normal chests can temporarily use a stricter equalization plan across matching filters before falling back to round-robin. Daytime crate processing now uses active/idle schedulers so plain green vacuum crates, tool-equipped farmer crates, interacting black crates, active black crates, and idle black crates do not all poll at the same rate. Auto Farmer day-change harvesting is now wave-based for large fields: 4 crates work at once, each crate breaks 2 tiles per step with a 0.1s realtime pause, keeps its gathered items locally until that crate finishes, then starts dumping to the network. Fruit-tree farmers follow that same pacing while keeping their dedicated northwest-first quadrant targeting. Green-crate exports on multi-green-crate networks now use larger `100`-item chunks for stackable harvest output once the local held stack is at least `100`, reducing belt clutter on big farms while keeping the normal `10`-item tail behavior. Harvest target ordering expands outward from the crate in square rings so the break pattern looks cleaner around the green crate. Holding a green crate now previews its effective `21 x 21` farm range, and Tape Measure toggles that same range on placed green crates. Classic day-change machine harvestables remain on the simpler stable chest-first path, are explicitly not Auto Farmer-owned, and now process in 100-machine / 0.2s waves to smooth heavy honey days. Shop stall stock is also patched to stay rebuyable instead of marking sold out after one purchase. Day-change systems use kickoff delays only, not full completion waits. Non-stackable fuel/durability items transfer as whole slot amounts through shared helpers so green-crate exports and black-crate pulls preserve durability.
 - **1.6.1** - Fixed load-in catch-up processing so existing day-change outputs now run after loading into a save once the world, player, and chests are ready. Added fixed 1 second phasing between day-change harvest systems, quarry mining credit, and a subtle conveyor animation polish so items travel 30% into the destination tile before vanishing.
 - **1.5.2** - Large single-chest day-change arrays now scan through the full connected harvest network with no arbitrary connected-array/path scan cutoffs. Day-change conveyor launches are staggered in 100-item / 0.2s batches per destination chest so 1000+ machine arrays stay visual while reducing the launch spike.

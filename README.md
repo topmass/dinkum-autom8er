@@ -1,6 +1,6 @@
 # Autom8er
 
-A BepInEx mod for Dinkum that fully automates machines, fish ponds, bug terrariums, crab pots, silos, and more with adjacent chests.
+A BepInEx mod for Dinkum that fully automates machines, fish ponds, bug terrariums, crab pots, silos, quarries, and farming with chests, conveyor paths, and special crates.
 
 ## Quick Install
 
@@ -12,6 +12,14 @@ Place any chest or crate next to a machine (furnace, grinder, BBQ, etc.):
 
 1. **Auto-Output:** When the machine finishes, the output goes into the chest (not dropped on ground)
 2. **Auto-Input:** If the chest has valid materials, the machine automatically reloads and starts again
+
+### Conveyor Belts
+Path tiles (Black Marble Path by default, configurable) act as conveyor belts connecting chests and machines across any distance. Items visually slide along the path. In multiplayer, guests who also run the mod see the belt animations too.
+
+### Special Crates
+- **White Crates** = input only: they feed machines but never receive outputs (white *chests* are normal storage)
+- **Black Crates** = filter crates: hold sample items and route matching items into a touching storage chest
+- **Green Crates** = AutoFarmer/vacuum crates: harvest nearby crops and fruit, till/fertilize/plant when holding tools, and forward everything into the connected network
 
 ### Fish Ponds & Bug Terrariums
 Place a chest within 3 tiles of a fish pond or bug terrarium:
@@ -31,16 +39,16 @@ Place a chest next to a silo to auto-fill it with feed.
 Auto Sorters work as input/output chests and are **exempt from KeepOneItem** — items deposited by automation trigger the sorter to fire items to nearby matching chests automatically.
 
 ### Auto Placers
-Auto Placers function as standard automation chests.
+Auto Placers can feed automation but are excluded from receiving machine outputs (they are special containers, not storage).
 
 ## Folder Structure
 
 ```
 Autom8er/
-├── README.md          # This file
+├── README.md              # This file
+├── project-specsheet.md   # Living spec: features, code structure, rules
 ├── mod/
-│   ├── topmass.autom8er.dll   # Pre-built mod - just install this
-│   └── README.md      # Installation instructions
+│   └── topmass.autom8er.dll   # Pre-built mod - just install this
 └── code/
     ├── Plugin.cs      # Source code
     ├── Autom8er.csproj
