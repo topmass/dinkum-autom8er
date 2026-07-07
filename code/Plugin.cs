@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.7.0")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.7.2")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
