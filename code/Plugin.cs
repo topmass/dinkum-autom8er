@@ -316,7 +316,7 @@ namespace Autom8er
             InfiniteFranklinOrdering = configInfiniteFranklinOrdering.Value;
             FreeChestCratePainting = configFreeChestCratePainting.Value;
 
-            Log.LogInfo("Autom8er v1.7.1 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", InfiniteToolRebuy=" + InfiniteToolRebuy + ", FranklinOrdering=" + InfiniteFranklinOrdering + ", FreeChestCratePainting=" + FreeChestCratePainting);
+            Log.LogInfo("Autom8er v1.7.2 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", InfiniteToolRebuy=" + InfiniteToolRebuy + ", FranklinOrdering=" + InfiniteFranklinOrdering + ", FreeChestCratePainting=" + FreeChestCratePainting);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
