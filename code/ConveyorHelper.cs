@@ -366,9 +366,10 @@ namespace Autom8er
                                         NetworkMapSharer.Instance.startTileTimerOnServer(capturedItemId, capturedMachineX, capturedMachineY, capturedInside);
                                         AutomationCreditHelper.TryGrantMachineInputCredit(capturedItemId, tileObjectId);
                                     }
-                                    else if (!FallbackDepositToAnyChest(capturedMachineX, capturedMachineY, capturedInside, capturedItemId, capturedTransferAmount))
+                                    else
                                     {
-                                        Plugin.LogWarningThrottled("machine-occupied-item-lost", "Autom8er: Machine occupied on arrival, no chest available, item lost.");
+                                        // Machine occupied on arrival: reroute, or ground-drop as last resort.
+                                        DeliverOrDrop(capturedMachineX, capturedMachineY, capturedInside, capturedItemId, capturedTransferAmount);
                                     }
                                 }
                                 finally
@@ -473,8 +474,7 @@ namespace Autom8er
                     int arrivalSlot = chestStillLive ? FindSlotForItem(capturedChest, capturedItemId) : -1;
                     if (arrivalSlot == -1)
                     {
-                        if (!FallbackDepositToAnyChest(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess))
-                            Plugin.LogWarningThrottled("target-full-item-lost", "Autom8er: Target chest full on arrival, no chest available, item lost.");
+                        DeliverOrDrop(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess);
                         return;
                     }
 
@@ -585,8 +585,7 @@ namespace Autom8er
                         int arrivalSlot = chestStillLive ? FindSlotForItem(capturedChest, capturedItemId) : -1;
                         if (arrivalSlot == -1)
                         {
-                            if (!FallbackDepositToAnyChestLegacy(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess))
-                                Plugin.LogWarningThrottled("target-full-item-lost", "Autom8er: Target chest full on arrival, no chest available, item lost.");
+                            DeliverOrDrop(capturedChestX, capturedChestY, capturedInside, capturedItemId, capturedStack, onDepositSuccess, legacySearch: true);
                             return;
                         }
 
@@ -628,6 +627,45 @@ namespace Autom8er
                 return true;
 
             return false;
+        }
+
+        // GUARANTEED-TERMINAL delivery sink (spec Open Review Finding 3). Every arrival
+        // callback whose intended destination can vanish or fill mid-animation must end
+        // here: chest search first, then a real networked ground drop at the origin tile.
+        // A ground drop is always possible, so items are never silently destroyed.
+        // onDepositSuccess (task/XP credit) fires only on a live chest write; the
+        // ground-drop tail intentionally does NOT invoke it, matching the old
+        // failed-fallback behavior where no credit was granted either.
+        public static void DeliverOrDrop(int originX, int originY, HouseDetails inside, int itemId, int stackAmount, System.Action onDepositSuccess = null, bool legacySearch = false)
+        {
+            if (itemId < 0 || stackAmount <= 0)
+                return;
+
+            bool deposited = legacySearch
+                ? FallbackDepositToAnyChestLegacy(originX, originY, inside, itemId, stackAmount, onDepositSuccess)
+                : FallbackDepositToAnyChest(originX, originY, inside, itemId, stackAmount, onDepositSuccess);
+            if (deposited)
+                return;
+
+            if (NetworkMapSharer.Instance == null || WorldManager.Instance == null)
+            {
+                // Should be unreachable on the host; log loudly so it shows up in reports.
+                Plugin.LogWarningThrottled("deliver-or-drop-no-server", "Autom8er: DeliverOrDrop had no server to spawn a ground drop, item lost.", 10f);
+                return;
+            }
+
+            float height = 0.5f;
+            if (originX >= 0 && originX < WorldManager.Instance.heightMap.GetLength(0) &&
+                originY >= 0 && originY < WorldManager.Instance.heightMap.GetLength(1))
+            {
+                height = WorldManager.Instance.heightMap[originX, originY];
+            }
+
+            // spawnAServerDrop (not a bare dropAnItem) so the drop is network-spawned
+            // and real for every client - see VacuumCrateHelper.SpawnFallbackGroundDrop.
+            Vector3 dropPos = new Vector3(originX * 2, height, originY * 2);
+            NetworkMapSharer.Instance.spawnAServerDrop(itemId, stackAmount, dropPos, inside);
+            Plugin.LogWarningThrottled("deliver-or-drop-ground", "Autom8er: No chest had room on arrival, dropped item on the ground instead.", 10f);
         }
 
         public static bool TryFindFilterDestinationFromCrate(Chest filterChest, HouseDetails inside, int itemId, out OutputDestination destination)

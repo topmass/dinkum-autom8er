@@ -262,13 +262,17 @@ namespace Autom8er
                 {
                     try
                     {
-                        // Re-check on arrival: a player may have loaded food manually during
-                        // the animation, and overwriting slot 22 would destroy their item.
+                        // Re-check on arrival. Two hazards (spec Open Review Finding 1):
+                        // the pond may have been picked up/replaced mid-animation (null
+                        // chest: writing to the stale coordinates would destroy the food),
+                        // or a player loaded food manually (occupied slot 22: overwriting
+                        // would destroy their item). Both routes must end in live storage
+                        // or a real networked ground drop, never a stale-coordinate write.
                         Chest pondChest = ContainerManager.manage.getChestForWindow(capturedPondX, capturedPondY, null);
-                        if (pondChest == null || pondChest.itemIds[22] == -1)
+                        if (pondChest != null && pondChest.itemIds[22] == -1)
                             ContainerManager.manage.changeSlotInChest(capturedPondX, capturedPondY, 22, capturedItemId, 1, null);
                         else
-                            ConveyorHelper.FallbackDepositToAnyChestLegacy(capturedSourceX, capturedSourceY, null, capturedItemId, 1);
+                            ConveyorHelper.DeliverOrDrop(capturedSourceX, capturedSourceY, null, capturedItemId, 1, null, legacySearch: true);
                     }
                     finally
                     {
@@ -524,14 +528,16 @@ namespace Autom8er
                         // destroying it. Add onto whatever the pond produced meanwhile.
                         Chest livePond = ContainerManager.manage.getChestForWindow(capturedRootX, capturedRootY, null);
                         int liveStack = (livePond != null && livePond.itemIds[23] == capturedOutputId) ? livePond.itemStacks[23] : 0;
-                        if (livePond == null || livePond.itemIds[23] == -1 || livePond.itemIds[23] == capturedOutputId)
+                        if (livePond != null && (livePond.itemIds[23] == -1 || livePond.itemIds[23] == capturedOutputId))
                         {
                             ContainerManager.manage.changeSlotInChest(capturedRootX, capturedRootY, 23, capturedOutputId, liveStack + capturedExtract, null);
                             Plugin.LogWarningThrottled("pond-extract-returned", "Autom8er: No storage available, returned output to pond/terrarium.");
                         }
                         else
                         {
-                            Plugin.LogWarningThrottled("pond-extract-lost", "Autom8er: No storage available and pond output slot occupied, items lost.");
+                            // Pond gone or slot 23 holds a different item: a networked
+                            // ground drop beats a stale-coordinate write or silent loss.
+                            ConveyorHelper.DeliverOrDrop(capturedRootX, capturedRootY, null, capturedOutputId, capturedExtract);
                         }
                     }
                 }

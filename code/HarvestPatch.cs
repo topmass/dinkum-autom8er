@@ -64,8 +64,8 @@ namespace Autom8er
                             if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1,
                                 () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1)))
                             {
-                                ConveyorHelper.FallbackDepositToAnyChestLegacy(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
-                                    () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1));
+                                ConveyorHelper.DeliverOrDrop(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
+                                    () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1), legacySearch: true);
                             }
                         };
 
@@ -110,8 +110,8 @@ namespace Autom8er
                                     if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1,
                                         () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1)))
                                     {
-                                        ConveyorHelper.FallbackDepositToAnyChestLegacy(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
-                                            () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1));
+                                        ConveyorHelper.DeliverOrDrop(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
+                                            () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1), legacySearch: true);
                                     }
                                 };
 
@@ -157,8 +157,8 @@ namespace Autom8er
                                         if (!HarvestHelper.TryDepositHarvestToChest(capturedChest, capturedInside, capturedItemId, 1,
                                             () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1)))
                                         {
-                                            ConveyorHelper.FallbackDepositToAnyChestLegacy(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
-                                                () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1));
+                                            ConveyorHelper.DeliverOrDrop(capturedChest.xPos, capturedChest.yPos, capturedInside, capturedItemId, 1,
+                                                () => AutomationCreditHelper.TryGrantHarvestOutputCredit(sourceTileObjectId, capturedItemId, 1), legacySearch: true);
                                         }
                                     };
 
