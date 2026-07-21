@@ -56,6 +56,7 @@ namespace Autom8er
         private static bool serverHandlersRegistered = false;
         private static bool clientHandlersRegistered = false;
         private static readonly HashSet<int> moddedConnectionIds = new HashSet<int>();
+        private static readonly HashSet<int> versionWarnedConnectionIds = new HashSet<int>();
         private static float nextBeaconAt = 0f;
 
         private static bool hostIsModded = false;
@@ -136,6 +137,19 @@ namespace Autom8er
             if (conn == null || Plugin.ConveyorTileType == -1)
                 return; // guest retries hello until welcomed
 
+            // Never send custom messages to a peer speaking a different protocol
+            // version: this game's Mirror build DISCONNECTS on unknown message ids,
+            // and even a known id with a changed schema would desync the reader.
+            // The guest keeps retrying hello, sees no Welcome, and stays vanilla-
+            // rendered, which is safe. Bump SYNC_VERSION on ANY change to the
+            // custom message schemas above.
+            if (msg.version != SYNC_VERSION)
+            {
+                if (versionWarnedConnectionIds.Add(conn.connectionId))
+                    Plugin.Log.LogWarning("Autom8er: Connection " + conn.connectionId + " runs sync protocol v" + msg.version + " but host is v" + SYNC_VERSION + "; conveyor animation sync disabled for that player (mod version mismatch).");
+                return;
+            }
+
             bool isNew = moddedConnectionIds.Add(conn.connectionId);
             conn.Send(new Autom8erWelcomeMessage { conveyorTileType = Plugin.ConveyorTileType });
             if (isNew)
@@ -195,6 +209,7 @@ namespace Autom8er
                 // Server stopped: Mirror's Shutdown cleared its handler table.
                 serverHandlersRegistered = false;
                 moddedConnectionIds.Clear();
+                versionWarnedConnectionIds.Clear();
             }
 
             if (!NetworkClient.active || !NetworkClient.isConnected)
