@@ -18,14 +18,7 @@ namespace Autom8er
     {
         static void Prefix()
         {
-            ConveyorAnimator.ClearAllAnimations();
-            ConveyorHelper.ClearPendingSorts();
-            ConveyorHelper.ClearFilterDistributionState();
-            FilterCrateHelper.ClearBulkDistributionState();
-            QuarryHelper.ClearState();
-            VacuumCrateHelper.ClearState();
-            HarvestHelper.ResetRuntimeState();
-            NewDayHarvestPatch.ResetRunningFlag();
+            RuntimeState.ResetForLoad();
             Plugin.QueueLoadCatchUp();
         }
 

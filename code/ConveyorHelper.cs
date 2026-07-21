@@ -1143,6 +1143,16 @@ namespace Autom8er
             filterDistributionCursor.Clear();
         }
 
+        // Full load-time reset for this helper (called via RuntimeState.ResetForLoad).
+        public static void ClearRuntimeState()
+        {
+            ClearPendingSorts();
+            ClearFilterDistributionState();
+            // Refresh throttle keyed by old-world chest anchors; harmless if stale in
+            // gameplay terms but grows unbounded across loads without this.
+            automationChestRefreshAt.Clear();
+        }
+
         private static bool TryFinishDestinationSearch(DestinationSearchState state, int itemId, HouseDetails inside, bool advanceFilterCursor, out OutputDestination destination)
         {
             if (TryChooseBalancedFilterDestination(state.filterDestinations, itemId, inside, advanceFilterCursor, out destination))

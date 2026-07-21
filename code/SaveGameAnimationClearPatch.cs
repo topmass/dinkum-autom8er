@@ -17,10 +17,7 @@ namespace Autom8er
     {
         static void Prefix()
         {
-            ConveyorAnimator.ClearAllAnimations();
-            ConveyorHelper.ClearFilterDistributionState();
-            FilterCrateHelper.ClearBulkDistributionState();
-            QuarryHelper.ClearState();
+            RuntimeState.ResetForSave();
         }
     }
 }
