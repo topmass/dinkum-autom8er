@@ -98,7 +98,7 @@ namespace Autom8er
                     if (!IsMachineEmpty(machineX, machineY, inside))
                         continue;
 
-                    if (ConveyorAnimator.IsTargetReserved(machineX, machineY))
+                    if (ConveyorAnimator.IsTargetReserved(machineX, machineY, inside))
                         continue;
 
                     if (!item.itemChange.checkIfCanBeDepositedServer(tileObjectId))
@@ -179,9 +179,33 @@ namespace Autom8er
         private static readonly HashSet<Vector2Int> scratchFeedNetwork = new HashSet<Vector2Int>();
         private static readonly Queue<Vector2Int> scratchFeedQueue = new Queue<Vector2Int>();
 
+        // Outdoor belt tiles whose network had no empty, unreserved machine earlier this
+        // frame. No machine frees up inside one synchronous scan pass, so later chests on
+        // the same network skip the walk. The set is frame-scoped: world edits always rescan.
+        private static readonly HashSet<Vector2Int> busyFeedNetworkTiles = new HashSet<Vector2Int>();
+        private static int busyFeedNetworkFrame = -1;
+
         public static bool TryFeedMachineViaConveyorPath(Chest sourceChest, HouseDetails inside)
         {
             if (Plugin.ConveyorTileType == -1)
+                return false;
+
+            // Avoid walking the full belt network when no chest item can feed any machine.
+            bool hasMachineInput = false;
+            for (int slot = 0; slot < sourceChest.itemIds.Length; slot++)
+            {
+                int itemId = sourceChest.itemIds[slot];
+                if (itemId < 0 || sourceChest.itemStacks[slot] <= 0 || itemId >= Inventory.Instance.allItems.Length)
+                    continue;
+
+                InventoryItem item = Inventory.Instance.allItems[itemId];
+                if (item != null && item.itemChange != null)
+                {
+                    hasMachineInput = true;
+                    break;
+                }
+            }
+            if (!hasMachineInput)
                 return false;
 
             // Find conveyor tiles adjacent to this chest
@@ -212,6 +236,14 @@ namespace Autom8er
             if (pathNetwork.Count == 0)
                 return false;
 
+            if (busyFeedNetworkFrame != Time.frameCount)
+            {
+                busyFeedNetworkTiles.Clear();
+                busyFeedNetworkFrame = Time.frameCount;
+            }
+            if (inside == null && busyFeedNetworkTiles.IsSupersetOf(pathNetwork))
+                return false;
+
             // BFS to find all connected path tiles.
             while (toExplore.Count > 0)
             {
@@ -238,6 +270,7 @@ namespace Autom8er
             }
 
             // Find machines touching the path network
+            bool foundOpenMachine = false;
             foreach (Vector2Int pathTile in pathNetwork)
             {
                 for (int i = 0; i < 4; i++)
@@ -267,8 +300,10 @@ namespace Autom8er
                     if (!IsMachineEmpty(machineX, machineY, inside))
                         continue;
 
-                    if (Plugin.AnimationEnabled && ConveyorAnimator.IsTargetReserved(machineX, machineY))
+                    if (Plugin.AnimationEnabled && ConveyorAnimator.IsTargetReserved(machineX, machineY, inside))
                         continue;
+
+                    foundOpenMachine = true;
 
                     // Try to feed this machine from the chest
                     for (int slot = 0; slot < sourceChest.itemIds.Length; slot++)
@@ -336,7 +371,7 @@ namespace Autom8er
 
                         if (Plugin.AnimationEnabled)
                         {
-                            ConveyorAnimator.ReserveTarget(machineX, machineY);
+                            ConveyorAnimator.ReserveTarget(machineX, machineY, inside);
 
                             Vector2Int chestPos = new Vector2Int(sourceChest.xPos, sourceChest.yPos);
                             Vector2Int machPos = new Vector2Int(machineX, machineY);
@@ -345,6 +380,7 @@ namespace Autom8er
                             int capturedItemId = itemId;
                             int capturedMachineX = machineX;
                             int capturedMachineY = machineY;
+                            int capturedTileObjectId = tileObjectId;
                             HouseDetails capturedInside = inside;
                             // Fuel items carry their durability in the stack field; the fallback
                             // must return the full taken amount, not amountNeeded (spec: Blast
@@ -357,14 +393,15 @@ namespace Autom8er
                                 // all automation until the next save/load clears it.
                                 try
                                 {
-                                    if (IsMachineEmpty(capturedMachineX, capturedMachineY, capturedInside))
+                                    if (GetTileObjectId(capturedMachineX, capturedMachineY, capturedInside) == capturedTileObjectId &&
+                                        IsMachineEmpty(capturedMachineX, capturedMachineY, capturedInside))
                                     {
                                         if (capturedInside != null)
                                             NetworkMapSharer.Instance.RpcDepositItemIntoChangerInside(capturedItemId, capturedMachineX, capturedMachineY, capturedInside.xPos, capturedInside.yPos);
                                         else
                                             NetworkMapSharer.Instance.RpcDepositItemIntoChanger(capturedItemId, capturedMachineX, capturedMachineY);
                                         NetworkMapSharer.Instance.startTileTimerOnServer(capturedItemId, capturedMachineX, capturedMachineY, capturedInside);
-                                        AutomationCreditHelper.TryGrantMachineInputCredit(capturedItemId, tileObjectId);
+                                        AutomationCreditHelper.TryGrantMachineInputCredit(capturedItemId, capturedTileObjectId);
                                     }
                                     else
                                     {
@@ -374,7 +411,7 @@ namespace Autom8er
                                 }
                                 finally
                                 {
-                                    ConveyorAnimator.UnreserveTarget(capturedMachineX, capturedMachineY);
+                                    ConveyorAnimator.UnreserveTarget(capturedMachineX, capturedMachineY, capturedInside);
                                 }
                             };
 
@@ -398,6 +435,16 @@ namespace Autom8er
                         return true;
                     }
                 }
+            }
+
+            // The walk skipped this chest's own tile, so a chest tile that is also a
+            // machine (gacha) cannot vouch for other chests on the network.
+            if (inside == null && !foundOpenMachine)
+            {
+                int sourceTileObjectId = GetTileObjectId(sourceChest.xPos, sourceChest.yPos, null);
+                TileObject sourceTile = sourceTileObjectId >= 0 ? WorldManager.Instance.allObjects[sourceTileObjectId] : null;
+                if (sourceTile == null || sourceTile.tileObjectItemChanger == null)
+                    busyFeedNetworkTiles.UnionWith(pathNetwork);
             }
 
             return false;
@@ -661,10 +708,15 @@ namespace Autom8er
                 height = WorldManager.Instance.heightMap[originX, originY];
             }
 
-            // spawnAServerDrop (not a bare dropAnItem) so the drop is network-spawned
+            // A server drop (not a bare dropAnItem) so the drop is network-spawned
             // and real for every client - see VacuumCrateHelper.SpawnFallbackGroundDrop.
             Vector3 dropPos = new Vector3(originX * 2, height, originY * 2);
-            NetworkMapSharer.Instance.spawnAServerDrop(itemId, stackAmount, dropPos, inside);
+            // Indoor drops need the displayed house's world position plus the local tile offset.
+            if (inside != null)
+                dropPos = HouseManager.manage.findHousesOnDisplay(inside.xPos, inside.yPos).getStartingPosTransform().position
+                    + new Vector3(originX * 2, 0f, originY * 2);
+            // ToSave matches vanilla machine ejects, so the drop survives save and reload.
+            NetworkMapSharer.Instance.spawnAServerDropToSave(itemId, stackAmount, dropPos, inside);
             Plugin.LogWarningThrottled("deliver-or-drop-ground", "Autom8er: No chest had room on arrival, dropped item on the ground instead.", 10f);
         }
 
@@ -1337,6 +1389,9 @@ namespace Autom8er
                 return false;
 
             OutputDestination firstEmptyDestination = null;
+            OutputDestination whiteMatchingDestination = null;
+            OutputDestination whiteEmptyDestination = null;
+            bool hasNormalStorage = false;
             bool isStackable = Inventory.Instance.allItems[itemId].checkIfStackable();
 
             for (int i = 0; i < 4; i++)
@@ -1347,9 +1402,32 @@ namespace Autom8er
                 if (chestX < 0 || chestY < 0)
                     continue;
 
+                // A white input crate is a filter target only when no normal storage
+                // touches this filter, even full storage (processing chains: filter -> white -> machine).
+                if (IsInputOnlyContainer(chestX, chestY, inside))
+                {
+                    Chest whiteCrate = FindChestAt(chestX, chestY, inside);
+                    int whiteSlot = whiteCrate != null ? FindSlotForItem(whiteCrate, itemId) : -1;
+                    if (whiteSlot == -1)
+                        continue;
+
+                    OutputDestination whiteCandidate = new OutputDestination { chest = whiteCrate, slotIndex = whiteSlot, routeX = filterX, routeY = filterY };
+                    if (isStackable && ChestHasMatchingStack(whiteCrate, itemId))
+                    {
+                        if (whiteMatchingDestination == null)
+                            whiteMatchingDestination = whiteCandidate;
+                    }
+                    else if (whiteEmptyDestination == null)
+                    {
+                        whiteEmptyDestination = whiteCandidate;
+                    }
+                    continue;
+                }
+
                 if (!IsValidFilterStorageChest(chestX, chestY, inside))
                     continue;
 
+                hasNormalStorage = true;
                 Chest storageChest = FindChestAt(chestX, chestY, inside);
                 if (storageChest == null)
                     continue;
@@ -1376,11 +1454,11 @@ namespace Autom8er
                     firstEmptyDestination = candidate;
             }
 
-            destination = firstEmptyDestination;
+            destination = hasNormalStorage ? firstEmptyDestination : (whiteMatchingDestination ?? whiteEmptyDestination);
             return destination != null;
         }
 
-        private static bool IsValidFilterStorageChest(int x, int y, HouseDetails inside)
+        internal static bool IsValidFilterStorageChest(int x, int y, HouseDetails inside)
         {
             if (IsInputOnlyContainer(x, y, inside) || IsOutputOnlyContainer(x, y, inside) || IsFilterCrate(x, y, inside))
                 return false;
@@ -1639,6 +1717,17 @@ namespace Autom8er
             return chestPlaceable != null && (chestPlaceable.isFishPond || chestPlaceable.isBugTerrarium);
         }
 
+        // Mannequins, tool racks, and display stands show items; they never feed automation.
+        public static bool IsDisplayContainer(int x, int y, HouseDetails inside)
+        {
+            int tileObjectId = GetTileObjectId(x, y, inside);
+            if (tileObjectId < 0)
+                return false;
+
+            ChestPlaceable chestPlaceable = WorldManager.Instance.allObjects[tileObjectId].tileObjectChest;
+            return chestPlaceable != null && (chestPlaceable.isMannequin || chestPlaceable.isToolRack || chestPlaceable.isDisplayStand);
+        }
+
         public static bool IsGenericAutomationRootContainer(int x, int y, HouseDetails inside)
         {
             // Read the tile ONCE - this predicate runs for every tile of full-map scans,
@@ -1809,7 +1898,7 @@ namespace Autom8er
 
         public static void QueueAutoSorterUpdate(Chest chest)
         {
-            long key = ((long)chest.xPos << 32) | (uint)chest.yPos;
+            long key = GetAutomationAnchorKey(chest);
             if (pendingSorts.Add(key))
             {
                 ContainerManager.manage.StartCoroutine(AutoSorterBatchSort(chest, key));

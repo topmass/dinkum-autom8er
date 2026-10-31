@@ -69,10 +69,7 @@ namespace Autom8er
                             }
                         };
 
-                        ConveyorAnimator.AnimateTransfer(itemId, 1,
-                            new Vector2Int(xPos, yPos),
-                            new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
-                            HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
+                        StartHarvestTransfer(itemId, xPos, yPos, capturedChest, inside, depositHarvest);
 
                         Plugin.LogVerbose("Autom8er: Crab pot harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                     }
@@ -115,10 +112,7 @@ namespace Autom8er
                                     }
                                 };
 
-                                ConveyorAnimator.AnimateTransfer(itemId, 1,
-                                    new Vector2Int(xPos, yPos),
-                                    new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
-                                    HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
+                                StartHarvestTransfer(itemId, xPos, yPos, capturedChest, inside, depositHarvest);
 
                                 Plugin.LogVerbose("Autom8er: Harvest -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                             }
@@ -162,10 +156,7 @@ namespace Autom8er
                                         }
                                     };
 
-                                    ConveyorAnimator.AnimateTransfer(itemId, 1,
-                                        new Vector2Int(xPos, yPos),
-                                        new Vector2Int(targetChest.xPos, targetChest.yPos), inside, depositHarvest,
-                                        HarvestHelper.GetNextDayChangeAnimationDelay(capturedChest));
+                                    StartHarvestTransfer(itemId, xPos, yPos, capturedChest, inside, depositHarvest);
 
                                     Plugin.LogVerbose("Autom8er: Harvest (loot) -> chest: " + Inventory.Instance.allItems[itemId].itemName);
                                 }
@@ -194,6 +185,20 @@ namespace Autom8er
             }
 
             return true; // Let original run
+        }
+
+        // During a save the chest snapshot is still to come, so the transfer starts once the save ends.
+        private static void StartHarvestTransfer(int itemId, int xPos, int yPos, Chest chest, HouseDetails inside, System.Action depositHarvest)
+        {
+            System.Action start = () => ConveyorAnimator.AnimateTransfer(itemId, 1,
+                new Vector2Int(xPos, yPos),
+                new Vector2Int(chest.xPos, chest.yPos), inside, depositHarvest,
+                HarvestHelper.GetNextDayChangeAnimationDelay(chest));
+
+            if (Plugin.IsSaving && Plugin.CanRunServerAutomation())
+                RuntimeState.RunAfterSave(start);
+            else
+                start();
         }
     }
 }

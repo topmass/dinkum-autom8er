@@ -39,10 +39,10 @@ namespace Autom8er
 
         private static bool HasAutoFarmerWaterTankInRange(int xPos, int yPos)
         {
-            int minX = Mathf.Max(0, xPos - Plugin.AUTO_FARMER_RANGE_TILES);
-            int maxX = Mathf.Min(WorldManager.Instance.onTileMap.GetLength(0) - 1, xPos + Plugin.AUTO_FARMER_RANGE_TILES);
-            int minY = Mathf.Max(0, yPos - Plugin.AUTO_FARMER_RANGE_TILES);
-            int maxY = Mathf.Min(WorldManager.Instance.onTileMap.GetLength(1) - 1, yPos + Plugin.AUTO_FARMER_RANGE_TILES);
+            int minX = Mathf.Max(0, xPos - Plugin.MAX_AUTO_FARMER_RANGE_TILES);
+            int maxX = Mathf.Min(WorldManager.Instance.onTileMap.GetLength(0) - 1, xPos + Plugin.MAX_AUTO_FARMER_RANGE_TILES);
+            int minY = Mathf.Max(0, yPos - Plugin.MAX_AUTO_FARMER_RANGE_TILES);
+            int maxY = Mathf.Min(WorldManager.Instance.onTileMap.GetLength(1) - 1, yPos + Plugin.MAX_AUTO_FARMER_RANGE_TILES);
 
             for (int x = minX; x <= maxX; x++)
             {

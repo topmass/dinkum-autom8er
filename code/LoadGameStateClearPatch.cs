@@ -13,9 +13,15 @@ namespace Autom8er
 
     // On game load, clear stale static state from the previous session.
     // Coroutines that would have cleaned pendingSorts are destroyed on scene reload.
-    [HarmonyPatch(typeof(SaveLoad), "loadOverFrames")]
+    [HarmonyPatch]
     public static class LoadGameStateClearPatch
     {
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            yield return AccessTools.Method(typeof(SaveLoad), "loadOverFrames");
+            yield return AccessTools.Method(typeof(SaveAndLoad), "LoadOverFrames");
+        }
+
         static void Prefix()
         {
             RuntimeState.ResetForLoad();

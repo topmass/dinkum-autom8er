@@ -23,8 +23,52 @@ namespace Autom8er
         private static readonly HashSet<long> scratchVisited = new HashSet<long>();
         private static readonly Queue<(int x, int y)> scratchQueue = new Queue<(int x, int y)>();
 
+        // Every item any growth-stage prefab accepts, split by crab pot. Prefab data is
+        // fixed, so the sets are rebuilt only when a new WorldManager appears.
+        private static WorldManager placeableInputsWorld;
+        private static readonly HashSet<InventoryItem> crabPotInputs = new HashSet<InventoryItem>();
+        private static readonly HashSet<InventoryItem> growthStageInputs = new HashSet<InventoryItem>();
+
+        // Contents-first pre-filter: a chest with no accepted input skips the radius and belt scans.
+        internal static bool ChestHasPlaceableInput(Chest chest, bool crabPot)
+        {
+            WorldManager world = WorldManager.Instance;
+            if (placeableInputsWorld != world)
+            {
+                placeableInputsWorld = world;
+                crabPotInputs.Clear();
+                growthStageInputs.Clear();
+                foreach (TileObject tileObj in world.allObjects)
+                {
+                    TileObjectGrowthStages growth = tileObj != null ? tileObj.tileObjectGrowthStages : null;
+                    if (growth == null || growth.itemsToPlace == null)
+                        continue;
+
+                    HashSet<InventoryItem> inputs = growth.isCrabPot ? crabPotInputs : growthStageInputs;
+                    foreach (InventoryItem input in growth.itemsToPlace)
+                    {
+                        if (input != null)
+                            inputs.Add(input);
+                    }
+                }
+            }
+
+            HashSet<InventoryItem> wanted = crabPot ? crabPotInputs : growthStageInputs;
+            for (int slot = 0; slot < chest.itemIds.Length; slot++)
+            {
+                int itemId = chest.itemIds[slot];
+                if (itemId >= 0 && itemId < Inventory.Instance.allItems.Length && chest.itemStacks[slot] > 0 &&
+                    wanted.Contains(Inventory.Instance.allItems[itemId]))
+                    return true;
+            }
+            return false;
+        }
+
         public static void TryLoadItemsIntoGrowthStages(Chest sourceChest, HouseDetails inside)
         {
+            if (!ChestHasPlaceableInput(sourceChest, false))
+                return;
+
             scratchChecked.Clear();
             HashSet<long> checkedPositions = scratchChecked;
 
@@ -51,8 +95,8 @@ namespace Autom8er
                     continue;
                 checkedPositions.Add(key);
 
-                if (checkX >= WorldManager.Instance.onTileMap.GetLength(0) ||
-                    checkY >= WorldManager.Instance.onTileMap.GetLength(1))
+                int[,] tileMap = inside != null ? inside.houseMapOnTile : WorldManager.Instance.onTileMap;
+                if (checkX >= tileMap.GetLength(0) || checkY >= tileMap.GetLength(1))
                     continue;
 
                 if (TryLoadAtPosition(sourceChest, checkX, checkY, inside))
@@ -120,9 +164,7 @@ namespace Autom8er
 
         private static bool TryLoadAtPosition(Chest sourceChest, int checkX, int checkY, HouseDetails inside)
         {
-            int tileObjectId = inside != null
-                ? inside.houseMapOnTile[checkX, checkY]
-                : WorldManager.Instance.onTileMap[checkX, checkY];
+            int tileObjectId = ConveyorHelper.GetTileObjectId(checkX, checkY, inside);
 
             if (tileObjectId < 0)
                 return false;
@@ -149,13 +191,13 @@ namespace Autom8er
             if (currentStatus >= growth.maxStageToReachByPlacing)
                 return false; // Already loaded
 
-            if (ConveyorAnimator.IsTargetReserved(checkX, checkY))
+            if (ConveyorAnimator.IsTargetReserved(checkX, checkY, inside))
                 return false;
 
-            return TryLoadFromChest(sourceChest, checkX, checkY, inside, growth);
+            return TryLoadFromChest(sourceChest, checkX, checkY, inside, tileObjectId, growth);
         }
 
-        private static bool TryLoadFromChest(Chest chest, int targetX, int targetY, HouseDetails inside, TileObjectGrowthStages growth)
+        private static bool TryLoadFromChest(Chest chest, int targetX, int targetY, HouseDetails inside, int tileObjectId, TileObjectGrowthStages growth)
         {
             for (int slot = 0; slot < chest.itemIds.Length; slot++)
             {
@@ -195,30 +237,51 @@ namespace Autom8er
                 else
                     ContainerManager.manage.changeSlotInChest(chest.xPos, chest.yPos, slot, itemId, remaining, inside);
 
-                ConveyorAnimator.ReserveTarget(targetX, targetY);
+                ConveyorAnimator.ReserveTarget(targetX, targetY, inside);
 
                 int capturedTargetX = targetX;
                 int capturedTargetY = targetY;
+                int capturedSourceX = chest.xPos;
+                int capturedSourceY = chest.yPos;
+                int capturedItemId = itemId;
+                int capturedTileObjectId = tileObjectId;
+                int capturedMaxStage = growth.maxStageToReachByPlacing;
                 HouseDetails capturedInside = inside;
                 System.Action depositItem = () =>
                 {
-                    int newStatus = (capturedInside != null
-                        ? capturedInside.houseMapOnTileStatus[capturedTargetX, capturedTargetY]
-                        : WorldManager.Instance.onTileStatusMap[capturedTargetX, capturedTargetY]) + 1;
+                    try
+                    {
+                        if (ConveyorHelper.GetTileObjectId(capturedTargetX, capturedTargetY, capturedInside) != capturedTileObjectId)
+                        {
+                            ConveyorHelper.DeliverOrDrop(capturedSourceX, capturedSourceY, capturedInside, capturedItemId, 1);
+                            return;
+                        }
 
-                    if (capturedInside != null)
-                    {
-                        capturedInside.houseMapOnTileStatus[capturedTargetX, capturedTargetY] = newStatus;
-                        // The plain RPC writes the WORLD map on clients - indoor targets must
-                        // use the Inside variant or clients corrupt tiles near the map origin.
-                        NetworkMapSharer.Instance.RpcGiveOnTileStatusInside(newStatus, capturedTargetX, capturedTargetY, capturedInside.xPos, capturedInside.yPos);
+                        int currentStatus = capturedInside != null
+                            ? capturedInside.houseMapOnTileStatus[capturedTargetX, capturedTargetY]
+                            : WorldManager.Instance.onTileStatusMap[capturedTargetX, capturedTargetY];
+                        if (currentStatus >= capturedMaxStage)
+                        {
+                            ConveyorHelper.DeliverOrDrop(capturedSourceX, capturedSourceY, capturedInside, capturedItemId, 1);
+                            return;
+                        }
+
+                        int newStatus = currentStatus + 1;
+                        if (capturedInside != null)
+                        {
+                            capturedInside.houseMapOnTileStatus[capturedTargetX, capturedTargetY] = newStatus;
+                            NetworkMapSharer.Instance.RpcGiveOnTileStatusInside(newStatus, capturedTargetX, capturedTargetY, capturedInside.xPos, capturedInside.yPos);
+                        }
+                        else
+                        {
+                            WorldManager.Instance.onTileStatusMap[capturedTargetX, capturedTargetY] = newStatus;
+                            NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedTargetX, capturedTargetY);
+                        }
                     }
-                    else
+                    finally
                     {
-                        WorldManager.Instance.onTileStatusMap[capturedTargetX, capturedTargetY] = newStatus;
-                        NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedTargetX, capturedTargetY);
+                        ConveyorAnimator.UnreserveTarget(capturedTargetX, capturedTargetY, capturedInside);
                     }
-                    ConveyorAnimator.UnreserveTarget(capturedTargetX, capturedTargetY);
                 };
 
                 ConveyorAnimator.AnimateTransfer(itemId, 1,

@@ -40,24 +40,30 @@ namespace Autom8er
             public float startDelay;
         }
 
-        private static long PosKey(int x, int y)
+        // House coordinates prevent equal local positions in different interiors from sharing a reservation.
+        private static long PosKey(int x, int y, HouseDetails inside)
         {
-            return ((long)x << 32) | (uint)y;
+            int insideX = inside != null ? inside.xPos + 1 : 0;
+            int insideY = inside != null ? inside.yPos + 1 : 0;
+            return (((long)x & 0xFFFFFL) << 44)
+                | (((long)y & 0xFFFFFL) << 24)
+                | (((long)insideX & 0xFFFL) << 12)
+                | ((long)insideY & 0xFFFL);
         }
 
-        public static void ReserveTarget(int x, int y)
+        public static void ReserveTarget(int x, int y, HouseDetails inside = null)
         {
-            reservedTargets.Add(PosKey(x, y));
+            reservedTargets.Add(PosKey(x, y, inside));
         }
 
-        public static void UnreserveTarget(int x, int y)
+        public static void UnreserveTarget(int x, int y, HouseDetails inside = null)
         {
-            reservedTargets.Remove(PosKey(x, y));
+            reservedTargets.Remove(PosKey(x, y, inside));
         }
 
-        public static bool IsTargetReserved(int x, int y)
+        public static bool IsTargetReserved(int x, int y, HouseDetails inside = null)
         {
-            return reservedTargets.Contains(PosKey(x, y));
+            return reservedTargets.Contains(PosKey(x, y, inside));
         }
 
         public static Vector3 TileToWorld(int tileX, int tileY)
@@ -80,7 +86,7 @@ namespace Autom8er
 
         public static void StartAnimation(int itemId, int stackAmount, List<Vector2Int> path, System.Action onArrival, float delay = 0f, bool indoor = false)
         {
-            if (path == null || path.Count < 2)
+            if (flushing || path == null || path.Count < 2)
             {
                 if (onArrival != null)
                     onArrival();
@@ -117,7 +123,7 @@ namespace Autom8er
 
         public static void AnimateArcTransfer(int itemId, int stackAmount, Vector3 startWorld, Vector3 endWorld, float duration, float arcHeight, System.Action onArrival, float delay = 0f)
         {
-            if (!Plugin.AnimationEnabled)
+            if (!Plugin.AnimationEnabled || flushing)
             {
                 if (onArrival != null)
                     onArrival();
@@ -256,33 +262,47 @@ namespace Autom8er
             }
         }
 
+        // Set while ClearAllAnimations runs. A leg that an arrival callback starts then arrives at once,
+        // as with animations off, so one pass delivers whole chains and never deletes a callback.
+        private static bool flushing;
+
         public static void ClearAllAnimations()
         {
-            for (int i = activeAnimations.Count - 1; i >= 0; i--)
-            {
-                ConveyorAnimation anim = activeAnimations[i];
-                if (anim.onArrival != null)
-                {
-                    try { anim.onArrival(); }
-                    catch (System.Exception e) { Plugin.LogWarningThrottled("clearall-callback-error", "Autom8er: ClearAll callback error: " + e.Message, 10f); }
-                }
-                if (anim.visual != null)
-                    GameObject.Destroy(anim.visual);
-            }
+            List<ConveyorAnimation> conveyorBatch = new List<ConveyorAnimation>(activeAnimations);
+            List<ArcAnimation> arcBatch = new List<ArcAnimation>(activeArcAnimations);
             activeAnimations.Clear();
-
-            for (int i = activeArcAnimations.Count - 1; i >= 0; i--)
-            {
-                ArcAnimation anim = activeArcAnimations[i];
-                if (anim.onArrival != null)
-                {
-                    try { anim.onArrival(); }
-                    catch (System.Exception e) { Plugin.LogWarningThrottled("clearall-arc-callback-error", "Autom8er: ClearAll arc callback error: " + e.Message, 10f); }
-                }
-                if (anim.visual != null)
-                    GameObject.Destroy(anim.visual);
-            }
             activeArcAnimations.Clear();
+            flushing = true;
+            try
+            {
+                for (int i = conveyorBatch.Count - 1; i >= 0; i--)
+                {
+                    ConveyorAnimation anim = conveyorBatch[i];
+                    if (anim.onArrival != null)
+                    {
+                        try { anim.onArrival(); }
+                        catch (System.Exception e) { Plugin.LogWarningThrottled("clearall-callback-error", "Autom8er: ClearAll callback error: " + e.Message, 10f); }
+                    }
+                    if (anim.visual != null)
+                        GameObject.Destroy(anim.visual);
+                }
+
+                for (int i = arcBatch.Count - 1; i >= 0; i--)
+                {
+                    ArcAnimation anim = arcBatch[i];
+                    if (anim.onArrival != null)
+                    {
+                        try { anim.onArrival(); }
+                        catch (System.Exception e) { Plugin.LogWarningThrottled("clearall-arc-callback-error", "Autom8er: ClearAll arc callback error: " + e.Message, 10f); }
+                    }
+                    if (anim.visual != null)
+                        GameObject.Destroy(anim.visual);
+                }
+            }
+            finally
+            {
+                flushing = false;
+            }
 
             reservedTargets.Clear();
         }
@@ -294,7 +314,7 @@ namespace Autom8er
 
         public static void AnimateTransfer(int itemId, int amount, Vector2Int source, Vector2Int dest, HouseDetails inside, System.Action depositCallback, float delay = 0f)
         {
-            if (!Plugin.AnimationEnabled)
+            if (!Plugin.AnimationEnabled || flushing)
             {
                 depositCallback();
                 return;

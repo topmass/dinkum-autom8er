@@ -504,14 +504,23 @@ namespace Autom8er
         {
             rootX = xPos;
             rootY = yPos;
-            tileObjectId = inside != null ? inside.houseMapOnTile[xPos, yPos] : WorldManager.Instance.onTileMap[xPos, yPos];
+            tileObjectId = -1;
+
+            int[,] tileMap = inside != null ? inside.houseMapOnTile : WorldManager.Instance.onTileMap;
+            if (tileMap == null || xPos < 0 || yPos < 0 ||
+                xPos >= tileMap.GetLength(0) || yPos >= tileMap.GetLength(1))
+                return false;
+
+            tileObjectId = tileMap[xPos, yPos];
 
             if (tileObjectId < -1)
             {
                 Vector2 rootPos = WorldManager.Instance.findMultiTileObjectPos(xPos, yPos);
                 rootX = (int)rootPos.x;
                 rootY = (int)rootPos.y;
-                tileObjectId = inside != null ? inside.houseMapOnTile[rootX, rootY] : WorldManager.Instance.onTileMap[rootX, rootY];
+                if (rootX < 0 || rootY < 0 || rootX >= tileMap.GetLength(0) || rootY >= tileMap.GetLength(1))
+                    return false;
+                tileObjectId = tileMap[rootX, rootY];
             }
 
             if (tileObjectId < 0)

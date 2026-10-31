@@ -184,10 +184,10 @@ namespace Autom8er
             const int ANIMAL_FOOD_ITEM_ID = 344;
 
             // Try to find Animal Food in chest - use root tile position
-            return TryLoadFeedFromChest(sourceChest, siloX, siloY, ANIMAL_FOOD_ITEM_ID, "Animal Food");
+            return TryLoadFeedFromChest(sourceChest, siloX, siloY, tileObjectId, ANIMAL_FOOD_ITEM_ID);
         }
 
-        private static bool TryLoadFeedFromChest(Chest chest, int siloX, int siloY, int validItemId, string itemName)
+        private static bool TryLoadFeedFromChest(Chest chest, int siloX, int siloY, int tileObjectId, int validItemId)
         {
             int currentStatus = WorldManager.Instance.onTileStatusMap[siloX, siloY];
             int siloRoom = 200 - currentStatus;
@@ -230,8 +230,12 @@ namespace Autom8er
 
                 Vector2Int source = new Vector2Int(chest.xPos, chest.yPos);
                 Vector2Int dest = new Vector2Int(siloX, siloY);
-                List<Vector2Int> path = ConveyorPathfinder.FindPath(source, dest, null);
-                float staggerInterval = 0.5f / Plugin.AnimationSpeed;
+                List<Vector2Int> path = Plugin.AnimationEnabled ? ConveyorPathfinder.FindPath(source, dest, null) : null;
+                float staggerInterval = Plugin.AnimationEnabled ? 0.5f / Plugin.AnimationSpeed : 0f;
+                int capturedSourceX = chest.xPos;
+                int capturedSourceY = chest.yPos;
+                int capturedItemId = itemId;
+                int capturedTileObjectId = tileObjectId;
 
                 for (int b = 0; b < numBags; b++)
                 {
@@ -243,11 +247,29 @@ namespace Autom8er
 
                     System.Action depositBag = () =>
                     {
-                        int newStatus = Mathf.Min(WorldManager.Instance.onTileStatusMap[capturedSiloX, capturedSiloY] + capturedAmount, 200);
-                        WorldManager.Instance.onTileStatusMap[capturedSiloX, capturedSiloY] = newStatus;
-                        NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedSiloX, capturedSiloY);
-                        if (isLastBag)
-                            ConveyorAnimator.UnreserveTarget(capturedSiloX, capturedSiloY);
+                        try
+                        {
+                            int acceptedAmount = 0;
+                            if (ConveyorHelper.GetTileObjectId(capturedSiloX, capturedSiloY, null) == capturedTileObjectId)
+                            {
+                                int liveStatus = WorldManager.Instance.onTileStatusMap[capturedSiloX, capturedSiloY];
+                                acceptedAmount = Mathf.Min(capturedAmount, Mathf.Max(0, 200 - liveStatus));
+                                if (acceptedAmount > 0)
+                                {
+                                    int newStatus = liveStatus + acceptedAmount;
+                                    WorldManager.Instance.onTileStatusMap[capturedSiloX, capturedSiloY] = newStatus;
+                                    NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedSiloX, capturedSiloY);
+                                }
+                            }
+
+                            if (acceptedAmount < capturedAmount)
+                                ConveyorHelper.DeliverOrDrop(capturedSourceX, capturedSourceY, null, capturedItemId, capturedAmount - acceptedAmount);
+                        }
+                        finally
+                        {
+                            if (isLastBag)
+                                ConveyorAnimator.UnreserveTarget(capturedSiloX, capturedSiloY);
+                        }
                     };
 
                     if (Plugin.AnimationEnabled && path != null && path.Count >= 2)

@@ -244,7 +244,7 @@ namespace Autom8er
                     if (NetworkMapSharer.Instance != null && WorldManager.Instance != null)
                     {
                         Vector3 sourceWorld = new Vector3(capturedSourceChest.xPos * 2, WorldManager.Instance.heightMap[capturedSourceChest.xPos, capturedSourceChest.yPos], capturedSourceChest.yPos * 2);
-                        NetworkMapSharer.Instance.spawnAServerDrop(capturedItemId, capturedAmount, sourceWorld, inside);
+                        NetworkMapSharer.Instance.spawnAServerDropToSave(capturedItemId, capturedAmount, sourceWorld, inside);
                     }
                 };
 
@@ -270,6 +270,31 @@ namespace Autom8er
                 if (dest != null && dest.chest != null &&
                     dest.chest.xPos == chest.xPos && dest.chest.yPos == chest.yPos)
                     return true;
+            }
+            return false;
+        }
+
+        private static bool TouchesSameItemFilter(int x, int y, HouseDetails inside, int itemId)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                int filterX = x + dx[i];
+                int filterY = y + dy[i];
+                if (ConveyorHelper.IsFilterCrate(filterX, filterY, inside) &&
+                    ConveyorHelper.ChestHasMatchingStack(ConveyorHelper.FindChestAt(filterX, filterY, inside), itemId))
+                {
+                    bool hasNormalStorage = false;
+                    for (int j = 0; j < 4; j++)
+                    {
+                        if (ConveyorHelper.IsValidFilterStorageChest(filterX + dx[j], filterY + dy[j], inside))
+                        {
+                            hasNormalStorage = true;
+                            break;
+                        }
+                    }
+                    if (!hasNormalStorage)
+                        return true;
+                }
             }
             return false;
         }
@@ -336,6 +361,11 @@ namespace Autom8er
                     // touching chests can become its destination once the current one fills,
                     // and shuttling between its own touching chests never ends.
                     if (Mathf.Abs(chest.xPos - filterChest.xPos) + Mathf.Abs(chest.yPos - filterChest.yPos) == 1)
+                        continue;
+
+                    // A white input crate fed by a same-item filter drops out of filterDestinations
+                    // once full; another filter must still not drain the machine's input stock.
+                    if (ConveyorHelper.IsInputOnlyContainer(checkX, checkY, inside) && TouchesSameItemFilter(checkX, checkY, inside, itemId))
                         continue;
 
                     if (ConveyorHelper.IsOutputOnlyContainer(checkX, checkY, inside) ||

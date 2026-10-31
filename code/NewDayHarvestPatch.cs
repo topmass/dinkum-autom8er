@@ -54,6 +54,11 @@ namespace Autom8er
                 if (initialDelay > 0f)
                     yield return new UnityEngine.WaitForSeconds(initialDelay);
 
+                // The end-of-day save usually starts during the initial delay. Each phase
+                // moves items between the map and chests, so it starts only between saves.
+                while (Plugin.IsSaving)
+                    yield return null;
+
                 if (NetworkMapSharer.Instance == null || !NetworkMapSharer.Instance.isServer || WorldManager.Instance == null)
                     yield break;
 
@@ -61,10 +66,16 @@ namespace Autom8er
                 Plugin.Log.LogInfo(startLog);
                 WorldManager.Instance.StartCoroutine(HarvestHelper.ProcessHarvestableMachines());
                 yield return new WaitForSeconds(DAY_CHANGE_PHASE_DELAY_SECONDS);
+                while (Plugin.IsSaving)
+                    yield return null;
                 WorldManager.Instance.StartCoroutine(VacuumCrateHelper.ProcessDayChangeVacuumHarvests());
                 yield return new WaitForSeconds(DAY_CHANGE_PHASE_DELAY_SECONDS);
+                while (Plugin.IsSaving)
+                    yield return null;
                 FishPondHelper.ProcessPondAndTerrariumOutput();
                 yield return new WaitForSeconds(POST_QUARRY_PHASE_DELAY_SECONDS);
+                while (Plugin.IsSaving)
+                    yield return null;
                 QuarryHelper.ProcessDayChangeQuarries();
                 Plugin.Log.LogInfo(endLog);
             }

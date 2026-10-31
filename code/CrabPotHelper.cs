@@ -29,6 +29,9 @@ namespace Autom8er
             if (inside != null)
                 return;
 
+            if (!GrowthStageHelper.ChestHasPlaceableInput(sourceChest, true))
+                return;
+
             scratchChecked.Clear();
             HashSet<long> checkedPositions = scratchChecked;
 
@@ -159,10 +162,10 @@ namespace Autom8er
                 return false;
 
             // Try to find valid bait in chest
-            return TryLoadBaitFromChest(sourceChest, checkX, checkY, growth);
+            return TryLoadBaitFromChest(sourceChest, checkX, checkY, tileObjectId, growth);
         }
 
-        private static bool TryLoadBaitFromChest(Chest chest, int crabPotX, int crabPotY, TileObjectGrowthStages growth)
+        private static bool TryLoadBaitFromChest(Chest chest, int crabPotX, int crabPotY, int tileObjectId, TileObjectGrowthStages growth)
         {
             if (growth.itemsToPlace == null || growth.itemsToPlace.Length == 0)
                 return false;
@@ -208,12 +211,31 @@ namespace Autom8er
 
                 int capturedPotX = crabPotX;
                 int capturedPotY = crabPotY;
+                int capturedSourceX = chest.xPos;
+                int capturedSourceY = chest.yPos;
+                int capturedItemId = itemId;
+                int capturedTileObjectId = tileObjectId;
+                int capturedMaxStage = growth.maxStageToReachByPlacing;
                 System.Action depositBait = () =>
                 {
-                    int newStatus = WorldManager.Instance.onTileStatusMap[capturedPotX, capturedPotY] + 1;
-                    WorldManager.Instance.onTileStatusMap[capturedPotX, capturedPotY] = newStatus;
-                    NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedPotX, capturedPotY);
-                    ConveyorAnimator.UnreserveTarget(capturedPotX, capturedPotY);
+                    try
+                    {
+                        int currentStatus = WorldManager.Instance.onTileStatusMap[capturedPotX, capturedPotY];
+                        if (ConveyorHelper.GetTileObjectId(capturedPotX, capturedPotY, null) != capturedTileObjectId ||
+                            currentStatus >= capturedMaxStage)
+                        {
+                            ConveyorHelper.DeliverOrDrop(capturedSourceX, capturedSourceY, null, capturedItemId, 1);
+                            return;
+                        }
+
+                        int newStatus = currentStatus + 1;
+                        WorldManager.Instance.onTileStatusMap[capturedPotX, capturedPotY] = newStatus;
+                        NetworkMapSharer.Instance.RpcGiveOnTileStatus(newStatus, capturedPotX, capturedPotY);
+                    }
+                    finally
+                    {
+                        ConveyorAnimator.UnreserveTarget(capturedPotX, capturedPotY);
+                    }
                 };
 
                 ConveyorAnimator.AnimateTransfer(itemId, 1,

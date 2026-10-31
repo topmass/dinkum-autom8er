@@ -20,9 +20,8 @@ namespace Autom8er
         private const int SEASON_ALL_DRY_TILE_TYPE = 43;
         private const int SEASON_ALL_WET_TILE_TYPE = 44;
         private const int INSTA_GROW_ITEM_ID = 1671;
-        private const int VACUUM_HARVEST_RADIUS_TILES = 10;
         private const int VACUUM_PICKUP_RADIUS_TILES = 12;
-        private const int MAX_LOGGING_ROW_LENGTH = 24;
+        internal const int MAX_LOGGING_ROW_LENGTH = 24;
         private const int MAX_LOGGING_GROWTH_CHAIN = 8;
         private const int LOGGING_DIRECTION_COLUMNS = 6;
         private const int LOGGING_DROP_RADIUS_TILES = 2;
@@ -30,7 +29,17 @@ namespace Autom8er
         // Ownership must outlive the worst-case scheduler rotation: 30s covers ~100 active
         // logging crates at the max 1.0s ScanInterval (~25s rotation).
         private const float LOGGING_COLLECTION_EXPIRY_SECONDS = 30f;
+        // A falling trunk normally drops after its game-data destroy time. Stop waiting this long after that.
+        private const float LOGGING_TRUNK_DROP_GRACE_SECONDS = 2f;
+        // A broken hive's break object drops in its Start, a few frames after the hive is destroyed.
+        private const float LOGGING_HIVE_BREAK_EXPIRY_SECONDS = 5f;
+        // A hive that moved more than this since it fell was carried or pushed. Leave it to the player.
+        private const float LOGGING_HIVE_MOVED_DISTANCE = 1f;
         private const int FARM_ACTIONS_PER_SCAN = Plugin.FARMER_ACTIONS_PER_STEP;
+        // Every axe crate shares one break budget, whatever network it is on. A tree, stump, or hive break
+        // spawns native falling trunks and drops, so at most this many happen per batch, as quarries batch.
+        private const int LOGGING_BREAKS_PER_BATCH = 4;
+        private const float LOGGING_BREAK_BATCH_SECONDS = 0.2f;
         private const float FARM_FOLLOW_UP_DELAY_SECONDS = 0.1f;
         private const float FARM_TILE_RESERVATION_SECONDS = 0.35f;
         private const float POST_DAY_CHANGE_HARVEST_FARM_DELAY_SECONDS = 0.3f;
@@ -109,6 +118,31 @@ namespace Autom8er
             public float expiresAt;
             public HashSet<uint> existingDropIds = new HashSet<uint>();
             public HashSet<uint> spawnedDropIds = new HashSet<uint>();
+            public List<LoggingHive> hives = new List<LoggingHive>();
+            // Set when outputs stay in the world until the crate has room. Ownership then covers only captured IDs.
+            public bool waitingForRoom;
+            // The felled tree, while its trunk has not dropped yet. A save cannot store a falling trunk.
+            public int trunkTileObjectId = -1;
+        }
+
+        private class LoggingHive
+        {
+            public PickUpAndCarry carry;
+            public Vector3 spawnedAt;
+        }
+
+        // A hive this mod broke. The honey and bees its break object rolls go to this crate.
+        private class LoggingHiveBreak
+        {
+            public Chest chest;
+            public PickUpAndCarry carry;
+            public int prefabId;
+            public PendingLoggingCollection collection;
+            public Vector3 position;
+            public float expiresAt;
+            public int slots;
+            // Stackable outputs this break counted a new slot for. Later hives stack onto them.
+            public List<int> newStackItemIds = new List<int>();
         }
 
         private enum LoggingActionType
@@ -137,6 +171,8 @@ namespace Autom8er
         private class DayChangeFarmerWaveState
         {
             public Chest chest;
+            public int wave;
+            public bool finished;
         }
 
         private class ReplantTilePlan
@@ -156,11 +192,48 @@ namespace Autom8er
         private static readonly Dictionary<long, float> pendingFlushStartedAt = new Dictionary<long, float>();
         private static readonly Dictionary<long, float> reservedFarmTiles = new Dictionary<long, float>();
         private static readonly List<PendingFarmAction> pendingFarmActions = new List<PendingFarmAction>();
+        // Keyed by the chopped tile, so one crate can wait on several falling trunks at once.
         private static readonly Dictionary<long, PendingLoggingCollection> pendingLoggingCollections = new Dictionary<long, PendingLoggingCollection>();
         private static readonly Dictionary<long, int> activeLoggingSeedByCrate = new Dictionary<long, int>();
         private static readonly Dictionary<long, Vector2Int> loggingDirectionByCrate = new Dictionary<long, Vector2Int>();
         private static readonly Dictionary<long, int> loggingRowLengthByCrate = new Dictionary<long, int>();
         private static readonly Dictionary<long, Chest> loggingCrateInstances = new Dictionary<long, Chest>();
+        // Scratch for one prune pass. A crate can have a full row of trunks pending.
+        private static readonly Dictionary<long, bool> pruneLiveCrates = new Dictionary<long, bool>();
+        private static bool loggingRowsLoaded = false;
+        // Set only inside a tracked trunk's doDrop, so a crate claims hives from its own felled trees only.
+        private static PendingLoggingCollection loggingHiveSpawnOwner;
+        // Set only while the game spawns the output of a hive this mod broke.
+        private static LoggingHiveBreak activeLoggingHiveBreak;
+        private static readonly List<LoggingHiveBreak> pendingLoggingHiveBreaks = new List<LoggingHiveBreak>();
+        // Logging timestamps use this clock. It stops while the game saves, because logging waits for the
+        // save, so a long save never expires an ownership or a hive break.
+        private static float loggingClockStoppedAt = -1f;
+        private static float loggingClockStoppedSeconds;
+        // The current logging break batch. A new batch starts from now, so a pause or slow frame never banks breaks.
+        private static float loggingBreakBatchStartedAt = float.NegativeInfinity;
+        private static int loggingBreaksInBatch;
+        // Set when the last crate processed had a break ready but the shared budget was spent.
+        private static bool loggingBreakDeferred;
+        internal static bool LoggingBreakDeferred => loggingBreakDeferred;
+        // Owned outputs as the game saves drops and carryables, written beside the chests. Values are
+        // kind, crate X/Y, source X/Y, then the kind's fields. See PrepareLoggingForSave.
+        private const int HELD_DROP = 0, HELD_HIVE = 1, HELD_RESPAWN_HIVE = 2, HELD_TRUNK = 3;
+        private class LoggingSaveRecord
+        {
+            public Chest chest;
+            public int[] values;
+        }
+        private static List<LoggingSaveRecord> loggingSaveRecords;
+        // Saved records not yet matched to a loaded drop or hive, and the collections they rebuild.
+        private static List<int[]> loggingLoadRecords;
+        private static readonly Dictionary<long, PendingLoggingCollection> restoredLoggingCollections = new Dictionary<long, PendingLoggingCollection>();
+        private static readonly List<int[]> restoredLoggingRespawns = new List<int[]>();
+        // Loaded drops that hold owned amounts, per owner. The game stacks equal drops on one tile while it loads.
+        private static readonly Dictionary<DroppedItem, Dictionary<PendingLoggingCollection, int>> restoredDropShares = new Dictionary<DroppedItem, Dictionary<PendingLoggingCollection, int>>();
+        private static bool loggingRestoreActive;
+        // Tree tile object to the first logging seed that grows into it. Built once from item data.
+        private static Dictionary<int, int> loggingSeedByTreeTile;
         private static readonly Dictionary<long, float> activeCrateUntil = new Dictionary<long, float>();
         private static readonly Dictionary<long, FarmerNetworkScaleState> farmerNetworkScaleCache = new Dictionary<long, FarmerNetworkScaleState>();
         private static bool dayChangeVacuumHarvestRunning = false;
@@ -176,17 +249,453 @@ namespace Autom8er
             if (chest == null)
                 return;
 
+            LoadLoggingRows();
             long chestKey = PosKey(chest.xPos, chest.yPos);
             Chest previousChest;
             if (loggingCrateInstances.TryGetValue(chestKey, out previousChest) && !object.ReferenceEquals(previousChest, chest))
             {
-                pendingLoggingCollections.Remove(chestKey);
+                foreach (PendingLoggingCollection collection in pendingLoggingCollections.Values)
+                {
+                    if (collection.chestX == chest.xPos && collection.chestY == chest.yPos)
+                        collection.expiresAt = -1f;
+                }
+                PruneExpiredLoggingCollections();
                 activeLoggingSeedByCrate.Remove(chestKey);
                 loggingDirectionByCrate.Remove(chestKey);
                 loggingRowLengthByCrate.Remove(chestKey);
             }
 
             loggingCrateInstances[chestKey] = chest;
+        }
+
+        // A carried or replaced crate must not keep acting through an old wave reference.
+        private static bool IsLiveFarmerChest(Chest chest)
+        {
+            return chest != null && chest.insideX == -1 && chest.insideY == -1 &&
+                ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, null) &&
+                object.ReferenceEquals(ContainerManager.manage.getChestForWindow(chest.xPos, chest.yPos, null), chest);
+        }
+
+        // Restore established rows once the saved world is ready, before choosing a logging action.
+        private static void LoadLoggingRows()
+        {
+            if (loggingRowsLoaded || !Plugin.CanRunServerAutomation() || SaveLoad.saveOrLoad == null || !SaveLoad.saveOrLoad.loadingComplete)
+                return;
+
+            loggingRowsLoaded = true;
+            RestoreLoggingCollections();
+            try
+            {
+                string path = LoggingSavePath();
+                if (!ES3.KeyExists("rows", path))
+                    return;
+
+                foreach (KeyValuePair<long, int[]> entry in ES3.Load<Dictionary<long, int[]>>("rows", path))
+                {
+                    // Values are seed item ID, direction X/Y, and row length.
+                    int[] row = entry.Value;
+                    if (row == null || row.Length != 4 || !IsLoggingTreePlantingItem(row[0]) ||
+                        row[1] < -1 || row[1] > 1 || row[2] < -1 || row[2] > 1 ||
+                        Mathf.Abs(row[1]) + Mathf.Abs(row[2]) != 1 || row[3] < 1 || row[3] > MAX_LOGGING_ROW_LENGTH)
+                        continue;
+
+                    int x = (int)(entry.Key >> 32);
+                    int y = (int)entry.Key;
+                    if (!ConveyorHelper.IsVacuumCrate(x, y, null))
+                        continue;
+
+                    Chest chest = ConveyorHelper.FindChestAt(x, y, null);
+                    if (!IsLiveFarmerChest(chest))
+                        continue;
+
+                    activeLoggingSeedByCrate[entry.Key] = row[0];
+                    loggingDirectionByCrate[entry.Key] = new Vector2Int(row[1], row[2]);
+                    loggingRowLengthByCrate[entry.Key] = row[3];
+                    loggingCrateInstances[entry.Key] = chest;
+                }
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Autom8er: Could not load logging rows: " + e.Message);
+            }
+        }
+
+        // Use the game's serializer alongside its chest save, with one file per save slot.
+        public static void SaveLoggingRows()
+        {
+            if (!Plugin.CanRunServerAutomation() || SaveLoad.saveOrLoad == null || !SaveLoad.saveOrLoad.loadingComplete)
+                return;
+
+            LoadLoggingRows();
+            try
+            {
+                Dictionary<long, int[]> rows = new Dictionary<long, int[]>();
+                foreach (KeyValuePair<long, Chest> entry in loggingCrateInstances)
+                {
+                    int seedItemId;
+                    int rowLength;
+                    Vector2Int direction;
+                    if (!IsLiveFarmerChest(entry.Value) || PosKey(entry.Value.xPos, entry.Value.yPos) != entry.Key ||
+                        !activeLoggingSeedByCrate.TryGetValue(entry.Key, out seedItemId) ||
+                        !loggingDirectionByCrate.TryGetValue(entry.Key, out direction) ||
+                        !loggingRowLengthByCrate.TryGetValue(entry.Key, out rowLength))
+                        continue;
+
+                    rows[entry.Key] = new[] { seedItemId, direction.x, direction.y, rowLength };
+                }
+
+                ES3.Save("rows", rows, LoggingSavePath());
+                ES3.Save("held", BuildLoggingHeldRecords(), LoggingSavePath());
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Autom8er: Could not save logging rows: " + e.Message);
+            }
+        }
+
+        private static string LoggingSavePath()
+        {
+            return SaveLoad.saveOrLoad.newFileSaver.GetSaveSlotDirectory() + "/autom8er-logging.es3";
+        }
+
+        private static float LoggingTime()
+        {
+            return (loggingClockStoppedAt >= 0f ? loggingClockStoppedAt : Time.time) - loggingClockStoppedSeconds;
+        }
+
+        // Takes one break from the shared budget. The logging clock stops in saves and game pauses, so they add no breaks.
+        private static bool TryTakeLoggingBreak()
+        {
+            float now = LoggingTime();
+            if (now >= loggingBreakBatchStartedAt + LOGGING_BREAK_BATCH_SECONDS)
+            {
+                loggingBreakBatchStartedAt = now;
+                loggingBreaksInBatch = 0;
+            }
+
+            if (loggingBreaksInBatch >= LOGGING_BREAKS_PER_BATCH)
+            {
+                loggingBreakDeferred = true;
+                return false;
+            }
+
+            loggingBreaksInBatch++;
+            return true;
+        }
+
+        // Runs at save start, in the frame the game then saves drops and carryables. Every owned drop
+        // becomes a saved drop, and each owned output is recorded once, as the game will store it.
+        internal static void PrepareLoggingForSave()
+        {
+            // A restore not yet given back happens now, so this save records it.
+            LoadLoggingRows();
+            PruneExpiredLoggingCollections();
+            if (loggingClockStoppedAt < 0f)
+                loggingClockStoppedAt = Time.time;
+
+            loggingSaveRecords = new List<LoggingSaveRecord>();
+            List<DroppedItem> drops = WorldManager.Instance != null ? WorldManager.Instance.itemsOnGround : null;
+            foreach (PendingLoggingCollection collection in pendingLoggingCollections.Values)
+            {
+                for (int i = 0; drops != null && i < drops.Count; i++)
+                {
+                    DroppedItem drop = drops[i];
+                    if (drop == null || pendingDrops.Contains(drop.netId) || !IsOwnedLoggingDrop(drop, collection))
+                        continue;
+
+                    // DropToSave stores the item, the stack, and the desired position cut to whole numbers.
+                    drop.saveDrop = true;
+                    collection.spawnedDropIds.Add(drop.netId);
+                    AddLoggingSaveRecord(collection, HELD_DROP, drop.myItemId, drop.stackAmount,
+                        (int)drop.desiredPos.x, (int)drop.desiredPos.y, (int)drop.desiredPos.z);
+                }
+
+                for (int i = 0; i < collection.hives.Count; i++)
+                {
+                    if (IsSavedCarryable(collection.hives[i].carry))
+                        AddLoggingHiveRecord(collection, HELD_HIVE, collection.hives[i].carry.prefabId, collection.hives[i].carry.transform.position);
+                }
+
+                if (collection.trunkTileObjectId >= 0)
+                    AddLoggingSaveRecord(collection, HELD_TRUNK, collection.trunkTileObjectId);
+            }
+
+            // A hive broken in the last frames is either still saved whole, or gone with no outputs yet.
+            // Its outputs wait for the save to end (TryTakeLoggingHiveOutput), so the save holds the hive once.
+            for (int i = 0; i < pendingLoggingHiveBreaks.Count; i++)
+            {
+                LoggingHiveBreak hiveBreak = pendingLoggingHiveBreaks[i];
+                if (LoggingTime() > hiveBreak.expiresAt)
+                    continue;
+
+                bool saved = IsSavedCarryable(hiveBreak.carry);
+                AddLoggingHiveRecord(hiveBreak.collection, saved ? HELD_HIVE : HELD_RESPAWN_HIVE, hiveBreak.prefabId,
+                    saved ? hiveBreak.carry.transform.position : hiveBreak.position);
+            }
+        }
+
+        // Matches CarrySave.saveAllCarryable, which runs in the same frame.
+        private static bool IsSavedCarryable(PickUpAndCarry carry)
+        {
+            return carry != null && carry.gameObject != null && carry.IsDropOnCurrentLevel() && !carry.delivered;
+        }
+
+        private static void AddLoggingSaveRecord(PendingLoggingCollection collection, params int[] fields)
+        {
+            int[] values = new int[fields.Length + 4];
+            values[0] = fields[0];
+            values[1] = collection.chestX;
+            values[2] = collection.chestY;
+            values[3] = collection.sourceX;
+            values[4] = collection.sourceY;
+            System.Array.Copy(fields, 1, values, 5, fields.Length - 1);
+            Chest chest;
+            loggingCrateInstances.TryGetValue(PosKey(collection.chestX, collection.chestY), out chest);
+            loggingSaveRecords.Add(new LoggingSaveRecord { chest = chest, values = values });
+        }
+
+        private static void AddLoggingHiveRecord(PendingLoggingCollection collection, int kind, int prefabId, Vector3 position)
+        {
+            AddLoggingSaveRecord(collection, kind, prefabId,
+                Mathf.RoundToInt(position.x * 100f), Mathf.RoundToInt(position.y * 100f), Mathf.RoundToInt(position.z * 100f));
+        }
+
+        // Written with the chest file. A crate removed or replaced since the save started owns nothing.
+        // A falling trunk or a hive broken before the save still comes back on load, unowned, so its outputs exist.
+        private static Dictionary<long, int[]> BuildLoggingHeldRecords()
+        {
+            Dictionary<long, int[]> held = new Dictionary<long, int[]>();
+            for (int i = 0; loggingSaveRecords != null && i < loggingSaveRecords.Count; i++)
+            {
+                LoggingSaveRecord record = loggingSaveRecords[i];
+                int[] values = (int[])record.values.Clone();
+                if (!IsLiveFarmerChest(record.chest) || record.chest.xPos != values[1] || record.chest.yPos != values[2])
+                {
+                    if (values[0] == HELD_DROP || values[0] == HELD_HIVE)
+                        continue;
+                    values[1] = -1;
+                    values[2] = -1;
+                }
+                held[held.Count] = values;
+            }
+
+            loggingSaveRecords = null;
+            return held;
+        }
+
+        // Reads the saved owned outputs once per load, before the game respawns saved drops and carryables.
+        private static void ReadLoggingLoadRecords()
+        {
+            if (loggingLoadRecords != null || SaveLoad.saveOrLoad == null || SaveLoad.saveOrLoad.newFileSaver == null)
+                return;
+
+            loggingLoadRecords = new List<int[]>();
+            try
+            {
+                string path = LoggingSavePath();
+                if (!ES3.KeyExists("held", path))
+                    return;
+
+                foreach (KeyValuePair<long, int[]> entry in ES3.Load<Dictionary<long, int[]>>("held", path))
+                {
+                    int[] values = entry.Value;
+                    int kind = values != null && values.Length > 0 ? values[0] : -1;
+                    int length = kind == HELD_DROP ? 10 : kind == HELD_TRUNK ? 6 : 9;
+                    if (kind < HELD_DROP || kind > HELD_TRUNK || values.Length != length)
+                        continue;
+
+                    if (kind == HELD_DROP || kind == HELD_HIVE)
+                        loggingLoadRecords.Add(values);
+                    else
+                    {
+                        GetRestoredLoggingCollection(values);
+                        restoredLoggingRespawns.Add(values);
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Autom8er: Could not load held logging outputs: " + e.Message);
+            }
+        }
+
+        private static PendingLoggingCollection GetRestoredLoggingCollection(int[] values)
+        {
+            long sourceKey = PosKey(values[3], values[4]);
+            PendingLoggingCollection collection;
+            if (!restoredLoggingCollections.TryGetValue(sourceKey, out collection))
+            {
+                // Ready at once, and owns only what it gets back.
+                collection = new PendingLoggingCollection
+                {
+                    chestX = values[1],
+                    chestY = values[2],
+                    sourceX = values[3],
+                    sourceY = values[4],
+                    waitingForRoom = true,
+                    expiresAt = float.MaxValue
+                };
+                restoredLoggingCollections[sourceKey] = collection;
+            }
+
+            return collection;
+        }
+
+        private static int[] TakeLoggingLoadRecord(System.Predicate<int[]> match)
+        {
+            int index = loggingLoadRecords.FindIndex(match);
+            if (index < 0)
+                return null;
+
+            int[] values = loggingLoadRecords[index];
+            loggingLoadRecords.RemoveAt(index);
+            return values;
+        }
+
+        // Brackets the game's respawn of saved drops and of saved carryables.
+        internal static void BeginLoggingRestore()
+        {
+            if (!Plugin.CanRunServerAutomation())
+                return;
+
+            ReadLoggingLoadRecords();
+            loggingRestoreActive = loggingLoadRecords.Count > 0;
+        }
+
+        // Stack sizes of loaded drops of this item, so the hook can see which drop a stacked load went into.
+        internal static Dictionary<DroppedItem, int> BeginLoggingRestoreDrop(int itemId)
+        {
+            if (!loggingRestoreActive || WorldManager.Instance == null)
+                return null;
+
+            Dictionary<DroppedItem, int> stacks = new Dictionary<DroppedItem, int>();
+            foreach (DroppedItem drop in WorldManager.Instance.itemsOnGround)
+            {
+                if (drop != null && drop.myItemId == itemId)
+                    stacks[drop] = drop.stackAmount;
+            }
+
+            return stacks;
+        }
+
+        // A saved drop matches a record by the exact fields DropToSave stored, and each record matches once.
+        internal static void CompleteLoggingRestoreDrop(int itemId, int stackAmount, Vector3 position, HouseDetails inside, Dictionary<DroppedItem, int> stacks)
+        {
+            if (stacks == null || inside != null)
+                return;
+
+            DroppedItem target = null;
+            foreach (DroppedItem drop in WorldManager.Instance.itemsOnGround)
+            {
+                int before;
+                if (drop != null && drop.myItemId == itemId && (!stacks.TryGetValue(drop, out before) || drop.stackAmount != before))
+                {
+                    target = drop;
+                    break;
+                }
+            }
+
+            int x = (int)position.x, y = (int)position.y, z = (int)position.z;
+            int[] record = target == null ? null : TakeLoggingLoadRecord(r =>
+                r[0] == HELD_DROP && r[5] == itemId && r[6] == stackAmount && r[7] == x && r[8] == y && r[9] == z);
+            if (record == null)
+                return;
+
+            PendingLoggingCollection owner = GetRestoredLoggingCollection(record);
+            Dictionary<PendingLoggingCollection, int> shares;
+            if (!restoredDropShares.TryGetValue(target, out shares))
+                restoredDropShares[target] = shares = new Dictionary<PendingLoggingCollection, int>();
+            int owned;
+            shares.TryGetValue(owner, out owned);
+            shares[owner] = owned + stackAmount;
+        }
+
+        // A loaded drop that holds exactly one crate's amount belongs to that crate. Any other owned amount
+        // becomes its own saved drop, so the rest of the stack stays the player's.
+        internal static void EndLoggingRestore()
+        {
+            if (!loggingRestoreActive)
+                return;
+
+            loggingRestoreActive = false;
+            foreach (KeyValuePair<DroppedItem, Dictionary<PendingLoggingCollection, int>> entry in restoredDropShares)
+            {
+                DroppedItem drop = entry.Key;
+                foreach (KeyValuePair<PendingLoggingCollection, int> share in entry.Value)
+                {
+                    if (share.Value >= drop.stackAmount)
+                    {
+                        share.Key.spawnedDropIds.Add(drop.netId);
+                        break;
+                    }
+
+                    drop.NetworkstackAmount = drop.stackAmount - share.Value;
+                    HoldLoggingOutput(share.Key, drop.myItemId, share.Value, drop.transform.position, -1);
+                }
+            }
+
+            restoredDropShares.Clear();
+        }
+
+        // Gives each saved collection back to its crate once the loaded world is ready. A falling trunk or a
+        // hive broken just before the save comes back as the game's own object, so its outputs roll once.
+        private static void RestoreLoggingCollections()
+        {
+            ReadLoggingLoadRecords();
+            for (int i = 0; i < restoredLoggingRespawns.Count; i++)
+            {
+                int[] values = restoredLoggingRespawns[i];
+                PendingLoggingCollection collection = GetRestoredLoggingCollection(values);
+                if (values[0] == HELD_TRUNK)
+                {
+                    RespawnLoggingTrunk(collection, values[5]);
+                    continue;
+                }
+
+                GameObject[] prefabs = SaveLoad.saveOrLoad.carryablePrefabs;
+                if (prefabs == null || values[5] < 0 || values[5] >= prefabs.Length)
+                    continue;
+
+                PickUpAndCarry hive = NetworkMapSharer.Instance.spawnACarryable(prefabs[values[5]],
+                    new Vector3(values[6] / 100f, values[7] / 100f, values[8] / 100f), false);
+                if (hive != null)
+                    collection.hives.Add(new LoggingHive { carry = hive, spawnedAt = hive.transform.position });
+            }
+            restoredLoggingRespawns.Clear();
+
+            foreach (KeyValuePair<long, PendingLoggingCollection> entry in restoredLoggingCollections)
+            {
+                PendingLoggingCollection collection = entry.Value;
+                Chest chest = collection.chestX < 0 ? null : ConveyorHelper.FindChestAt(collection.chestX, collection.chestY, null);
+                // Without its crate, everything stays in the world for the player.
+                if (!IsLiveFarmerChest(chest))
+                    continue;
+
+                loggingCrateInstances[PosKey(chest.xPos, chest.yPos)] = chest;
+                pendingLoggingCollections[entry.Key] = collection;
+            }
+            restoredLoggingCollections.Clear();
+        }
+
+        // The game's own trunk falls again and drops after its destroy time, as after a fresh chop.
+        private static void RespawnLoggingTrunk(PendingLoggingCollection collection, int treeTileObjectId)
+        {
+            TileObjectSettings[] settings = WorldManager.Instance.allObjectSettings;
+            GameObject trunkPrefab = treeTileObjectId >= 0 && treeTileObjectId < settings.Length && settings[treeTileObjectId] != null
+                ? settings[treeTileObjectId].dropsObjectOnDeath : null;
+            WorldObject trunk = trunkPrefab != null ? trunkPrefab.GetComponent<WorldObject>() : null;
+            if (trunk == null)
+                return;
+
+            int x = collection.sourceX;
+            int y = collection.sourceY;
+            // Drops already near the stump keep their owners, as at a fresh chop.
+            CaptureLoggingDropIds(collection, collection.existingDropIds, collection.spawnedDropIds);
+            collection.waitingForRoom = false;
+            collection.trunkTileObjectId = treeTileObjectId;
+            collection.collectAt = LoggingTime() + (trunk.destroyAndDropItemAfterTime ? trunk.destroyTime : 0f) + LOGGING_TRUNK_DROP_GRACE_SECONDS;
+            collection.expiresAt = collection.collectAt + LOGGING_COLLECTION_EXPIRY_SECONDS;
+            GameObject.Instantiate(trunkPrefab, new Vector3(x * 2, WorldManager.Instance.heightMap[x, y], y * 2), Quaternion.identity);
         }
 
         public static void MarkCrateActive(Chest chest)
@@ -263,6 +772,9 @@ namespace Autom8er
 
         private static System.Collections.IEnumerator ProcessDayChangeVacuumHarvestsCore()
         {
+            while (IsWorldSaving())
+                yield return null;
+
             ActivateAllVacuumCrates();
 
             List<Chest> chestsCopy = new List<Chest>(ContainerManager.manage.activeChests);
@@ -321,6 +833,9 @@ namespace Autom8er
 
                 while (true)
                 {
+                    while (IsWorldSaving())
+                        yield return null;
+
                     bool hasPendingCrates = false;
                     bool hasRemainingHarvest = false;
                     float nextFlushDelay = float.MaxValue;
@@ -427,12 +942,10 @@ namespace Autom8er
                     outdoorCropFarmerCrates.Add(chest);
             }
 
-            bool[] loggingWavesDone = new bool[1];
-            WorldManager.Instance.StartCoroutine(RunDayChangeFarmerWaves(outdoorLoggingCrates, loggingWavesDone));
+            // Paced logging can run on after waking. The crop phase ends without it, and the daytime
+            // scheduler shares the same break budget, so neither lane holds the other back.
+            WorldManager.Instance.StartCoroutine(RunDayChangeFarmerWaves(outdoorLoggingCrates, new bool[1]));
             yield return RunDayChangeFarmerWaves(outdoorCropFarmerCrates, new bool[1]);
-
-            while (!loggingWavesDone[0])
-                yield return null;
 
             if (harvested > 0)
             {
@@ -440,56 +953,72 @@ namespace Autom8er
             }
         }
 
+        // The save writes drops and carryables first and chests frames later. Taking a drop, breaking a hive,
+        // or felling a tree in between would duplicate or lose items, so day-change work waits for the save.
+        private static bool IsWorldSaving()
+        {
+            return SaveLoad.saveOrLoad != null && SaveLoad.saveOrLoad.isSaving;
+        }
+
+        // A new wave of crates starts once the newest wave has no immediate work left. Crates still
+        // waiting on falling trunks or follow-up actions keep stepping beside it, so one slow
+        // animation never holds back the rest of the day-change run.
         private static System.Collections.IEnumerator RunDayChangeFarmerWaves(List<Chest> crates, bool[] doneFlag)
         {
             try
             {
-                for (int waveStart = 0; waveStart < crates.Count; waveStart += DAY_CHANGE_HARVEST_CRATES_PER_WAVE)
+                List<DayChangeFarmerWaveState> runningStates = new List<DayChangeFarmerWaveState>();
+                int nextCrateIndex = 0;
+                int newestWave = 0;
+                bool startNextWave = true;
+                int firstState = 0;
+
+                while (true)
                 {
-                    int waveEnd = Mathf.Min(crates.Count, waveStart + DAY_CHANGE_HARVEST_CRATES_PER_WAVE);
-                    List<DayChangeFarmerWaveState> waveStates = new List<DayChangeFarmerWaveState>(waveEnd - waveStart);
+                    while (IsWorldSaving())
+                        yield return null;
 
-                    for (int crateIndex = waveStart; crateIndex < waveEnd; crateIndex++)
+                    if (startNextWave && nextCrateIndex < crates.Count)
                     {
-                        waveStates.Add(new DayChangeFarmerWaveState
+                        newestWave++;
+                        int waveEnd = Mathf.Min(crates.Count, nextCrateIndex + DAY_CHANGE_HARVEST_CRATES_PER_WAVE);
+                        for (; nextCrateIndex < waveEnd; nextCrateIndex++)
                         {
-                            chest = crates[crateIndex]
-                        });
+                            if (crates[nextCrateIndex] != null)
+                                runningStates.Add(new DayChangeFarmerWaveState { chest = crates[nextCrateIndex], wave = newestWave });
+                        }
                     }
 
-                    while (true)
+                    bool newestWaveWorked = false;
+                    DayChangeFarmerWaveState firstDeferred = null;
+                    for (int i = 0; i < runningStates.Count; i++)
                     {
-                        bool didAnyWork = false;
+                        // Crates the logging break budget turned away go first next step, so every row keeps its turn.
+                        DayChangeFarmerWaveState state = runningStates[(firstState + i) % runningStates.Count];
+                        loggingBreakDeferred = false;
+                        int workDone = TryProcessBundledCropReplantStep(state.chest);
+                        if (workDone <= 0)
+                            workDone = TryProcessFarmTileCore(state.chest, ignoreSuspension: true);
 
-                        for (int crateIndex = 0; crateIndex < waveStates.Count; crateIndex++)
-                        {
-                            DayChangeFarmerWaveState state = waveStates[crateIndex];
-                            if (state == null || state.chest == null)
-                                continue;
+                        if (loggingBreakDeferred && firstDeferred == null)
+                            firstDeferred = state;
 
-                            int workDone = TryProcessBundledCropReplantStep(state.chest);
-                            if (workDone <= 0)
-                                workDone = TryProcessFarmTileCore(state.chest, ignoreSuspension: true);
-
-                            if (workDone > 0)
-                                didAnyWork = true;
-                        }
-
-                        if (ProcessPendingFarmActions(ignoreSuspension: true) > 0)
-                            didAnyWork = true;
-
-                        if (!didAnyWork &&
-                            !HasPendingFarmActionsForAny(crates, waveStart, waveEnd) &&
-                            !HasPendingLoggingCollectionForAny(crates, waveStart, waveEnd))
-                        {
-                            break;
-                        }
-
-                        yield return new WaitForSecondsRealtime(DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS);
+                        // A crate waiting on the break budget still has work, so it neither finishes nor starts a wave.
+                        if (workDone > 0 || loggingBreakDeferred)
+                            newestWaveWorked |= state.wave == newestWave;
+                        else
+                            // A crate waiting for room keeps retrying on the daytime scheduler, so it never holds the run open.
+                            state.finished = !HasPendingFarmActionsForChest(state.chest) && !HasPendingLoggingCollection(state.chest, ignoreWaitingForRoom: true);
                     }
 
-                    if (waveEnd < crates.Count && DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS > 0f)
-                        yield return new WaitForSecondsRealtime(DAY_CHANGE_HARVEST_WAVE_DELAY_SECONDS);
+                    ProcessPendingFarmActions(ignoreSuspension: true);
+                    runningStates.RemoveAll(state => state.finished);
+                    firstState = firstDeferred != null ? runningStates.IndexOf(firstDeferred) : 0;
+                    if (runningStates.Count == 0 && nextCrateIndex >= crates.Count)
+                        break;
+
+                    startNextWave = !newestWaveWorked;
+                    yield return new WaitForSecondsRealtime(DAY_CHANGE_HARVEST_STEP_DELAY_SECONDS);
                 }
             }
             finally
@@ -523,10 +1052,10 @@ namespace Autom8er
             int mapW = WorldManager.Instance.onTileMap.GetLength(0);
             int mapH = WorldManager.Instance.onTileMap.GetLength(1);
 
-            int minX = Mathf.Max(0, xPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxX = Mathf.Min(mapW - 1, xPos + VACUUM_HARVEST_RADIUS_TILES);
-            int minY = Mathf.Max(0, yPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxY = Mathf.Min(mapH - 1, yPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minX = Mathf.Max(0, xPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxX = Mathf.Min(mapW - 1, xPos + Plugin.AUTO_FARMER_RANGE_TILES);
+            int minY = Mathf.Max(0, yPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxY = Mathf.Min(mapH - 1, yPos + Plugin.AUTO_FARMER_RANGE_TILES);
 
             Chest bestChest = null;
             int bestDistance = int.MaxValue;
@@ -539,7 +1068,7 @@ namespace Autom8er
                         continue;
 
                     Chest chest = ConveyorHelper.FindChestAt(x, y, null);
-                    if (chest == null)
+                    if (chest == null || !FarmEnclosureHelper.IsInFarmArea(chest, xPos, yPos))
                         continue;
 
                     int distance = Mathf.Abs(x - xPos) + Mathf.Abs(y - yPos);
@@ -560,10 +1089,10 @@ namespace Autom8er
             int mapW = WorldManager.Instance.onTileMap.GetLength(0);
             int mapH = WorldManager.Instance.onTileMap.GetLength(1);
 
-            int minX = Mathf.Max(0, xPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxX = Mathf.Min(mapW - 1, xPos + VACUUM_HARVEST_RADIUS_TILES);
-            int minY = Mathf.Max(0, yPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxY = Mathf.Min(mapH - 1, yPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minX = Mathf.Max(0, xPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxX = Mathf.Min(mapW - 1, xPos + Plugin.AUTO_FARMER_RANGE_TILES);
+            int minY = Mathf.Max(0, yPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxY = Mathf.Min(mapH - 1, yPos + Plugin.AUTO_FARMER_RANGE_TILES);
 
             for (int x = minX; x <= maxX; x++)
             {
@@ -611,13 +1140,12 @@ namespace Autom8er
                 if (!IsDropInSameSpace(drop, inside))
                     continue;
 
-                PendingLoggingCollection loggingOwner = FindLoggingDropOwner(drop);
                 if (loggingCollection == null)
                 {
-                    if (loggingOwner != null)
+                    if (FindLoggingDropOwner(drop) != null)
                         continue;
                 }
-                else if (loggingOwner != loggingCollection)
+                else if (!IsOwnedLoggingDrop(drop, loggingCollection))
                 {
                     continue;
                 }
@@ -630,7 +1158,7 @@ namespace Autom8er
                     continue;
                 }
 
-                if (!CanVacuumDeposit(chest, inside, drop.myItemId))
+                if (loggingCollection != null ? !CanTakeLoggingOutput(chest, drop.myItemId) : !CanVacuumDeposit(chest, inside, drop.myItemId))
                     continue;
 
                 candidates.Add(drop);
@@ -656,6 +1184,10 @@ namespace Autom8er
             {
                 VacuumDropGroup group = groups[i];
                 if (group == null || group.totalStackAmount <= 0 || group.itemId < 0)
+                    continue;
+
+                // An earlier group may have used the last free slot.
+                if (loggingCollection != null && !CanTakeLoggingOutput(chest, group.itemId))
                     continue;
 
                 int removedStackAmount = 0;
@@ -743,6 +1275,18 @@ namespace Autom8er
 
                     SpawnFallbackGroundDrop(itemId, stackAmount, tallyType, chestWorld, inside);
                 };
+
+                if (loggingCollection != null)
+                {
+                    // Store now, so later groups and hive room checks see the real room. The arc is only the visual.
+                    for (int removedIndex = 0; removedIndex < removedDropIds.Count; removedIndex++)
+                        pendingDrops.Remove(removedDropIds[removedIndex]);
+
+                    if (!HarvestHelper.TryDepositHarvestToChest(chest, inside, itemId, stackAmount,
+                        () => AutomationCreditHelper.TryGrantDroppedItemPickupCredit(itemId, stackAmount, tallyType)))
+                        HoldLoggingOutput(loggingCollection, itemId, stackAmount, startWorld, tallyType);
+                    onArrival = null;
+                }
 
                 ConveyorAnimator.AnimateArcTransfer(itemId, stackAmount, startWorld, chestWorld, duration, arcHeight, onArrival, delay);
                 longestAnimation = Mathf.Max(longestAnimation, delay + duration);
@@ -856,6 +1400,7 @@ namespace Autom8er
 
         public static void TryProcessFarmTile(Chest chest, HouseDetails inside)
         {
+            loggingBreakDeferred = false;
             if (chest == null || inside != null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, inside))
                 return;
 
@@ -870,14 +1415,63 @@ namespace Autom8er
 
         private static int TryProcessFarmTileCore(Chest chest, bool ignoreSuspension)
         {
-            if (chest == null)
+            if (!Plugin.CanRunServerAutomation() || IsWorldSaving() || !IsLiveFarmerChest(chest))
                 return 0;
 
             if (!ignoreSuspension && AreFarmerActionsSuspended())
                 return 0;
 
+            EnsureLoggingCrateInstance(chest);
+            PruneExpiredLoggingCollections();
+
+            // Finish earlier chops even if the player has since removed the axe.
+            List<PendingLoggingCollection> readyCollections = null;
+            foreach (PendingLoggingCollection collection in pendingLoggingCollections.Values)
+            {
+                if (collection.chestX != chest.xPos || collection.chestY != chest.yPos || LoggingTime() < collection.collectAt)
+                    continue;
+
+                if (readyCollections == null)
+                    readyCollections = new List<PendingLoggingCollection>();
+                readyCollections.Add(collection);
+            }
+
+            int collected = 0;
+            bool waitingForRoom = false;
+            for (int i = 0; readyCollections != null && i < readyCollections.Count; i++)
+            {
+                PendingLoggingCollection collection = readyCollections[i];
+                // The trunk wait is over, whether or not it dropped.
+                collection.trunkTileObjectId = -1;
+                if (!collection.waitingForRoom)
+                    CaptureLoggingDropIds(collection, collection.spawnedDropIds, collection.existingDropIds);
+                TryVacuumNearbyDrops(chest, null, collection);
+                TryBreakLoggingHives(chest, collection);
+                if (HoldLoggingCollection(collection))
+                {
+                    waitingForRoom = true;
+                    continue;
+                }
+
+                pendingLoggingCollections.Remove(PosKey(collection.sourceX, collection.sourceY));
+                collected++;
+                MarkCrateActive(chest);
+            }
+
             if (HasAxeTool(chest))
-                return TryProcessLoggingStep(chest);
+            {
+                // A crate without room for its outputs stops felling until it has room.
+                if (waitingForRoom)
+                    return collected;
+
+                // At most one break per crate per pass, so each row falls tree by tree from the crate outward.
+                int loggingActions = 0;
+                bool broke = false;
+                while (loggingActions < FARM_ACTIONS_PER_SCAN && TryProcessLoggingStep(chest, ref broke) > 0)
+                    loggingActions++;
+
+                return collected + loggingActions;
+            }
 
             int actionsCompleted = 0;
             for (int action = 0; action < FARM_ACTIONS_PER_SCAN; action++)
@@ -888,28 +1482,11 @@ namespace Autom8er
                 actionsCompleted++;
             }
 
-            return actionsCompleted;
+            return collected + actionsCompleted;
         }
 
-        private static int TryProcessLoggingStep(Chest chest)
+        private static int TryProcessLoggingStep(Chest chest, ref bool broke)
         {
-            EnsureLoggingCrateInstance(chest);
-            PruneExpiredLoggingCollections();
-
-            long chestKey = PosKey(chest.xPos, chest.yPos);
-            PendingLoggingCollection pendingCollection;
-            if (pendingLoggingCollections.TryGetValue(chestKey, out pendingCollection))
-            {
-                if (Time.time < pendingCollection.collectAt)
-                    return 0;
-
-                CaptureLoggingDropIds(pendingCollection, pendingCollection.spawnedDropIds, pendingCollection.existingDropIds);
-                TryVacuumNearbyDrops(chest, null, pendingCollection);
-                pendingLoggingCollections.Remove(chestKey);
-                MarkCrateActive(chest);
-                return 1;
-            }
-
             LoggingActionType actionType;
             int tileX;
             int tileY;
@@ -933,21 +1510,31 @@ namespace Autom8er
             }
 
             TileObjectSettings settings = WorldManager.Instance.allObjectSettings[tileObjectId];
-            if (settings == null)
+            if (settings == null || broke || !TryTakeLoggingBreak())
                 return 0;
 
-            pendingCollection = new PendingLoggingCollection
+            broke = true;
+            // A falling trunk drops later. Its drop call moves collectAt forward; the destroy time bounds the wait.
+            WorldObject deathObject = settings.dropsObjectOnDeath != null
+                ? settings.dropsObjectOnDeath.GetComponent<WorldObject>() : null;
+            float collectAt = LoggingTime() + LOGGING_DROP_SETTLE_SECONDS;
+            bool fallingTrunk = deathObject != null && (deathObject.destroyAndDropItemAfterTime || deathObject.destroyAndDropBeforeTime);
+            if (fallingTrunk)
+                collectAt = LoggingTime() + (deathObject.destroyAndDropItemAfterTime ? deathObject.destroyTime : 0f) + LOGGING_TRUNK_DROP_GRACE_SECONDS;
+
+            PendingLoggingCollection pendingCollection = new PendingLoggingCollection
             {
                 chestX = chest.xPos,
                 chestY = chest.yPos,
                 sourceX = tileX,
                 sourceY = tileY,
-                collectAt = Time.time + LOGGING_DROP_SETTLE_SECONDS,
-                expiresAt = Time.time + LOGGING_COLLECTION_EXPIRY_SECONDS
+                collectAt = collectAt,
+                expiresAt = collectAt + LOGGING_COLLECTION_EXPIRY_SECONDS,
+                trunkTileObjectId = fallingTrunk ? tileObjectId : -1
             };
 
             CaptureLoggingDropIds(pendingCollection, pendingCollection.existingDropIds, null);
-            pendingLoggingCollections[chestKey] = pendingCollection;
+            pendingLoggingCollections[PosKey(tileX, tileY)] = pendingCollection;
             NetworkMapSharer.Instance.RpcUpdateOnTileObject(settings.changeToTileObjectOnDeath, tileX, tileY);
             CaptureLoggingDropIds(pendingCollection, pendingCollection.spawnedDropIds, pendingCollection.existingDropIds);
 
@@ -981,50 +1568,40 @@ namespace Autom8er
             {
                 int checkX;
                 int checkY;
-                if (!TryGetLoggingRowTile(chest, seedItemId, rowIndex, out checkX, out checkY))
+                // A tile whose drops are still pending keeps its stump until collection.
+                if (!TryGetLoggingRowTile(chest, seedItemId, rowIndex, out checkX, out checkY, checkEnclosure: false) ||
+                    pendingLoggingCollections.ContainsKey(PosKey(checkX, checkY)))
                     continue;
 
                 int checkTileObjectId = WorldManager.Instance.onTileMap[checkX, checkY];
-                if (checkTileObjectId >= 0 && checkTileObjectId != 30)
-                {
-                    if (IsLoggingStump(checkTileObjectId, axe) || IsMatureLoggingTree(checkX, checkY, checkTileObjectId, axe))
-                    {
-                        actionType = LoggingActionType.Chop;
-                        tileX = checkX;
-                        tileY = checkY;
-                        tileObjectId = checkTileObjectId;
-                        return true;
-                    }
+                LoggingActionType foundAction = LoggingActionType.None;
+                if (checkTileObjectId >= 0 && checkTileObjectId != 30 &&
+                    (IsLoggingStump(checkTileObjectId, axe) || IsMatureLoggingTree(checkX, checkY, checkTileObjectId, axe)))
+                    foundAction = LoggingActionType.Chop;
+                else if (seedSlot != -1 && CanPlantLoggingSeedAt(seedItemId, checkX, checkY))
+                    foundAction = LoggingActionType.Plant;
 
-                    if (seedSlot != -1 && CanPlantLoggingSeedAt(seedItemId, checkX, checkY))
-                    {
-                        actionType = LoggingActionType.Plant;
-                        tileX = checkX;
-                        tileY = checkY;
-                        return true;
-                    }
-
+                // The fence check reads the crate's whole enclosure window, so run it only for a tile with work.
+                if (foundAction == LoggingActionType.None || !FarmEnclosureHelper.IsInsideEnclosure(chest, checkX, checkY))
                     continue;
-                }
 
-                if (seedSlot != -1 && CanPlantLoggingSeedAt(seedItemId, checkX, checkY))
-                {
-                    actionType = LoggingActionType.Plant;
-                    tileX = checkX;
-                    tileY = checkY;
-                    return true;
-                }
+                actionType = foundAction;
+                tileX = checkX;
+                tileY = checkY;
+                if (foundAction == LoggingActionType.Chop)
+                    tileObjectId = checkTileObjectId;
+                return true;
             }
 
             return false;
         }
 
-        private static bool TryGetLoggingRowTile(Chest chest, int seedItemId, int rowIndex, out int tileX, out int tileY)
+        private static bool TryGetLoggingRowTile(Chest chest, int seedItemId, int rowIndex, out int tileX, out int tileY, bool checkEnclosure = true)
         {
-            return TryGetLoggingTileInDirection(chest, GetLoggingDirection(chest, seedItemId), rowIndex, out tileX, out tileY);
+            return TryGetLoggingTileInDirection(chest, GetLoggingDirection(chest, seedItemId), rowIndex, out tileX, out tileY, checkEnclosure);
         }
 
-        private static bool TryGetLoggingTileInDirection(Chest chest, Vector2Int direction, int rowIndex, out int tileX, out int tileY)
+        private static bool TryGetLoggingTileInDirection(Chest chest, Vector2Int direction, int rowIndex, out int tileX, out int tileY, bool checkEnclosure = true)
         {
             tileX = 0;
             tileY = 0;
@@ -1043,7 +1620,8 @@ namespace Autom8er
                 return false;
             }
 
-            return Mathf.Abs(heightMap[tileX, tileY] - heightMap[chest.xPos, chest.yPos]) <= 1;
+            return Mathf.Abs(heightMap[tileX, tileY] - heightMap[chest.xPos, chest.yPos]) <= 1 &&
+                (!checkEnclosure || FarmEnclosureHelper.IsInsideEnclosure(chest, tileX, tileY));
         }
 
         private static Vector2Int GetLoggingDirection(Chest chest, int preferredSeedItemId)
@@ -1127,7 +1705,8 @@ namespace Autom8er
 
                     int tileObjectId = WorldManager.Instance.onTileMap[tileX, tileY];
                     int seedItemId = FindLoggingSeedForTreeTile(tileObjectId);
-                    if (preferredSeedItemId >= 0 && seedItemId != preferredSeedItemId)
+                    // Other species are skipped. Stumps still count toward the row.
+                    if (preferredSeedItemId >= 0 && seedItemId >= 0 && seedItemId != preferredSeedItemId)
                         continue;
 
                     if (seedItemId >= 0 && (directionSeedItemId < 0 || seedItemId == directionSeedItemId))
@@ -1174,37 +1753,32 @@ namespace Autom8er
             if (!IsLoggingTreeObject(tileObjectId) || Inventory.Instance == null)
                 return -1;
 
-            for (int itemId = 0; itemId < Inventory.Instance.allItems.Length; itemId++)
+            // Lowest item ID first, so each stage keeps the seed the full item scan found first.
+            if (loggingSeedByTreeTile == null)
             {
-                if (!IsLoggingTreePlantingItem(itemId))
-                    continue;
+                loggingSeedByTreeTile = new Dictionary<int, int>();
+                for (int itemId = 0; itemId < Inventory.Instance.allItems.Length; itemId++)
+                {
+                    if (!IsLoggingTreePlantingItem(itemId))
+                        continue;
 
-                if (LoggingSeedProducesTreeTile(itemId, tileObjectId))
-                    return itemId;
+                    TileObject treeObject = Inventory.Instance.allItems[itemId].placeable;
+                    for (int stage = 0; stage < MAX_LOGGING_GROWTH_CHAIN && treeObject != null; stage++)
+                    {
+                        if (!loggingSeedByTreeTile.ContainsKey(treeObject.tileObjectId))
+                            loggingSeedByTreeTile[treeObject.tileObjectId] = itemId;
+
+                        TileObjectGrowthStages growth = treeObject.tileObjectGrowthStages;
+                        if (growth == null || !growth.changeToWhenGrown || growth.changeToWhenGrown == treeObject)
+                            break;
+
+                        treeObject = growth.changeToWhenGrown;
+                    }
+                }
             }
 
-            return -1;
-        }
-
-        private static bool LoggingSeedProducesTreeTile(int seedItemId, int tileObjectId)
-        {
-            if (!IsLoggingTreePlantingItem(seedItemId))
-                return false;
-
-            TileObject treeObject = Inventory.Instance.allItems[seedItemId].placeable;
-            for (int stage = 0; stage < MAX_LOGGING_GROWTH_CHAIN && treeObject != null; stage++)
-            {
-                if (treeObject.tileObjectId == tileObjectId)
-                    return true;
-
-                TileObjectGrowthStages growth = treeObject.tileObjectGrowthStages;
-                if (growth == null || !growth.changeToWhenGrown || growth.changeToWhenGrown == treeObject)
-                    break;
-
-                treeObject = growth.changeToWhenGrown;
-            }
-
-            return false;
+            int seedItemId;
+            return loggingSeedByTreeTile.TryGetValue(tileObjectId, out seedItemId) ? seedItemId : -1;
         }
 
         private static void CaptureLoggingDropIds(PendingLoggingCollection collection, HashSet<uint> destination, HashSet<uint> excluded)
@@ -1222,11 +1796,25 @@ namespace Autom8er
 
                 Vector2Int dropTile = GetDropTile(drop);
                 if (Mathf.Abs(dropTile.x - collection.sourceX) <= LOGGING_DROP_RADIUS_TILES &&
-                    Mathf.Abs(dropTile.y - collection.sourceY) <= LOGGING_DROP_RADIUS_TILES)
+                    Mathf.Abs(dropTile.y - collection.sourceY) <= LOGGING_DROP_RADIUS_TILES &&
+                    !IsCapturedByOtherLoggingCollection(drop.netId, collection))
                 {
                     destination.Add(drop.netId);
                 }
             }
+        }
+
+        // An exact death capture is authoritative. A nearby rescan must not claim a neighbor row's wood that fell
+        // within radius, or the nearest-source tie-break hands it to the wrong crate.
+        private static bool IsCapturedByOtherLoggingCollection(uint netId, PendingLoggingCollection collection)
+        {
+            foreach (PendingLoggingCollection other in pendingLoggingCollections.Values)
+            {
+                if (other != collection && other.spawnedDropIds.Contains(netId))
+                    return true;
+            }
+
+            return false;
         }
 
         internal static HashSet<uint> BeginLoggingDropCapture(int sourceX, int sourceY, HouseDetails inside)
@@ -1249,7 +1837,7 @@ namespace Autom8er
             return existingDropIds;
         }
 
-        internal static void CompleteLoggingDropCapture(int sourceX, int sourceY, HouseDetails inside, HashSet<uint> existingDropIds)
+        internal static void CompleteLoggingDropCapture(int sourceX, int sourceY, HouseDetails inside, HashSet<uint> existingDropIds, bool worldObjectDrop = false)
         {
             if (inside != null || existingDropIds == null || WorldManager.Instance == null || WorldManager.Instance.itemsOnGround == null)
                 return;
@@ -1257,6 +1845,12 @@ namespace Autom8er
             PendingLoggingCollection collection = FindPendingLoggingCollectionAtSource(sourceX, sourceY);
             if (collection == null)
                 return;
+
+            if (worldObjectDrop)
+            {
+                collection.collectAt = LoggingTime() + LOGGING_DROP_SETTLE_SECONDS;
+                collection.trunkTileObjectId = -1;
+            }
 
             List<DroppedItem> drops = WorldManager.Instance.itemsOnGround;
             for (int i = 0; i < drops.Count; i++)
@@ -1272,17 +1866,357 @@ namespace Autom8er
 
         private static PendingLoggingCollection FindPendingLoggingCollectionAtSource(int sourceX, int sourceY)
         {
-            foreach (KeyValuePair<long, PendingLoggingCollection> entry in pendingLoggingCollections)
+            // A collection waiting for room no longer claims new deaths at its tile, such as a player chopping the stump.
+            PendingLoggingCollection collection;
+            return pendingLoggingCollections.TryGetValue(PosKey(sourceX, sourceY), out collection) &&
+                LoggingTime() <= collection.expiresAt && !collection.waitingForRoom ? collection : null;
+        }
+
+        internal static void BeginLoggingHiveSpawnCapture(int sourceX, int sourceY)
+        {
+            loggingHiveSpawnOwner = FindPendingLoggingCollectionAtSource(sourceX, sourceY);
+        }
+
+        internal static void EndLoggingWorldObjectDrop()
+        {
+            loggingHiveSpawnOwner = null;
+            activeLoggingHiveBreak = null;
+        }
+
+        internal static void RecordLoggingHiveSpawn(PickUpAndCarry carry)
+        {
+            // While the game loads saved carryables, a hive matches its saved prefab and position once.
+            if (loggingRestoreActive && carry != null)
             {
-                PendingLoggingCollection collection = entry.Value;
-                if (collection != null && collection.sourceX == sourceX && collection.sourceY == sourceY &&
-                    Time.time <= collection.expiresAt)
+                Vector3 at = carry.transform.position;
+                int[] record = TakeLoggingLoadRecord(r => r[0] == HELD_HIVE && r[5] == carry.prefabId &&
+                    Mathf.Abs(r[6] - at.x * 100f) <= 2f && Mathf.Abs(r[7] - at.y * 100f) <= 2f && Mathf.Abs(r[8] - at.z * 100f) <= 2f);
+                if (record != null)
+                    GetRestoredLoggingCollection(record).hives.Add(new LoggingHive { carry = carry, spawnedAt = at });
+                return;
+            }
+
+            if (loggingHiveSpawnOwner != null && carry != null && GetLoggingHiveBreakObject(carry) != null)
+                loggingHiveSpawnOwner.hives.Add(new LoggingHive { carry = carry, spawnedAt = carry.transform.position });
+        }
+
+        // A hive is a carryable whose break object spawns insects. Other carryables keep their normal behavior.
+        private static WorldObject GetLoggingHiveBreakObject(PickUpAndCarry carry)
+        {
+            Damageable damageable = carry.GetComponent<Damageable>();
+            WorldObject breakObject = damageable != null && damageable.spawnWorldObjectOnDeath != null
+                ? damageable.spawnWorldObjectOnDeath.GetComponent<WorldObject>() : null;
+            return breakObject != null && breakObject.spawnBugOnDrop != null &&
+                breakObject.bugPositions != null && breakObject.bugPositions.Length > 0 ? breakObject : null;
+        }
+
+        // Any bug net in the crate opts in, at any durability. Automation never uses up the net.
+        private static bool HasBugNet(Chest chest)
+        {
+            for (int slot = 0; slot < chest.itemIds.Length; slot++)
+            {
+                if (IsBugNetItem(chest.itemIds[slot]))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsBugNetItem(int itemId)
+        {
+            if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            return item != null && item.isATool && item.myAnimType == InventoryItem.typeOfAnimation.BugNet;
+        }
+
+        // Breaks the hives this collection's trunk dropped, through the game's own hive death.
+        // A hive stays on the list, whole, until the crate has room for its worst-case outputs.
+        private static void TryBreakLoggingHives(Chest chest, PendingLoggingCollection collection)
+        {
+            // Without a net the hives stay whole for the player.
+            if (collection.hives.Count == 0 || !HasBugNet(chest))
+            {
+                collection.hives.Clear();
+                return;
+            }
+
+            // Hives this crate broke that have not dropped yet still need their room.
+            HashSet<int> claimedStackItemIds = new HashSet<int>();
+            int freeSlots = CountEmptySlots(chest) - CountReservedLoggingHiveSlots(chest, claimedStackItemIds);
+
+            for (int i = 0; i < collection.hives.Count; i++)
+            {
+                PickUpAndCarry carry = collection.hives[i].carry;
+                Damageable damageable = carry != null ? carry.GetComponent<Damageable>() : null;
+                WorldObject breakObject = carry != null ? GetLoggingHiveBreakObject(carry) : null;
+                // A hive that was carried, moved, sold, or already broken stays the player's.
+                if (carry == null || carry.beingCarriedBy != 0 || carry.delivered ||
+                    HorizontalDistance(carry.transform.position, collection.hives[i].spawnedAt) > LOGGING_HIVE_MOVED_DISTANCE ||
+                    damageable == null || damageable.health <= 0 || breakObject == null)
                 {
-                    return collection;
+                    collection.hives.RemoveAt(i--);
+                    continue;
+                }
+
+                // Check room before breaking. Without room the hive waits, whole.
+                List<int> newStackItemIds = new List<int>();
+                int slots = CountLoggingHiveOutputSlots(chest, breakObject, claimedStackItemIds, newStackItemIds);
+                if (freeSlots < slots)
+                    continue;
+
+                // A hive break is a native break too. Over budget the hive stays whole and the collection holds it.
+                if (!TryTakeLoggingBreak())
+                    break;
+
+                freeSlots -= slots;
+                claimedStackItemIds.UnionWith(newStackItemIds);
+                pendingLoggingHiveBreaks.Add(new LoggingHiveBreak
+                {
+                    chest = chest,
+                    carry = carry,
+                    prefabId = carry.prefabId,
+                    collection = collection,
+                    position = carry.transform.position,
+                    expiresAt = LoggingTime() + LOGGING_HIVE_BREAK_EXPIRY_SECONDS,
+                    slots = slots,
+                    newStackItemIds = newStackItemIds
+                });
+                collection.hives.RemoveAt(i--);
+                damageable.changeHealth(-damageable.health);
+            }
+        }
+
+        // Slots that hives this crate broke still need until their outputs drop.
+        private static int CountReservedLoggingHiveSlots(Chest chest, HashSet<int> claimedStackItemIds)
+        {
+            int reserved = 0;
+            for (int i = 0; i < pendingLoggingHiveBreaks.Count; i++)
+            {
+                if (object.ReferenceEquals(pendingLoggingHiveBreaks[i].chest, chest) && LoggingTime() <= pendingLoggingHiveBreaks[i].expiresAt)
+                {
+                    reserved += pendingLoggingHiveBreaks[i].slots;
+                    if (claimedStackItemIds != null)
+                        claimedStackItemIds.UnionWith(pendingLoggingHiveBreaks[i].newStackItemIds);
                 }
             }
 
-            return null;
+            return reserved;
+        }
+
+        // Logging outputs go straight into the crate. A new slot must leave the room broken hives still need.
+        private static bool CanTakeLoggingOutput(Chest chest, int itemId)
+        {
+            int slot = ConveyorHelper.FindSlotForItem(chest, itemId);
+            return slot != -1 && (chest.itemIds[slot] == itemId || CountEmptySlots(chest) > CountReservedLoggingHiveSlots(chest, null));
+        }
+
+        // A collection that waits for room owns only the drops it captured, so later nearby drops stay free.
+        private static bool IsOwnedLoggingDrop(DroppedItem drop, PendingLoggingCollection collection)
+        {
+            return (!collection.waitingForRoom || collection.spawnedDropIds.Contains(drop.netId)) && FindLoggingDropOwner(drop) == collection;
+        }
+
+        // True while the collection still has outputs in the world, whole hives, or a hive break that has not dropped.
+        // Its drops are then saved with the world, because normal drops vanish on reload.
+        private static bool HoldLoggingCollection(PendingLoggingCollection collection)
+        {
+            bool held = collection.hives.Count > 0;
+            for (int i = 0; i < pendingLoggingHiveBreaks.Count; i++)
+            {
+                if (pendingLoggingHiveBreaks[i].collection == collection && LoggingTime() <= pendingLoggingHiveBreaks[i].expiresAt)
+                    held = true;
+            }
+
+            List<DroppedItem> drops = WorldManager.Instance.itemsOnGround;
+            for (int i = 0; drops != null && i < drops.Count; i++)
+            {
+                DroppedItem drop = drops[i];
+                if (drop == null || pendingDrops.Contains(drop.netId) || !IsOwnedLoggingDrop(drop, collection))
+                    continue;
+
+                drop.saveDrop = true;
+                collection.spawnedDropIds.Add(drop.netId);
+                held = true;
+            }
+
+            if (held)
+            {
+                collection.waitingForRoom = true;
+                // Only crate removal or replacement ends the wait. Pruning still checks that.
+                collection.expiresAt = float.MaxValue;
+            }
+
+            return held;
+        }
+
+        // Keeps an output the crate cannot store yet as a saved pickup that this collection still owns.
+        private static void HoldLoggingOutput(PendingLoggingCollection collection, int itemId, int stackAmount, Vector3 position, int xPType)
+        {
+            List<DroppedItem> drops = WorldManager.Instance.itemsOnGround;
+            int before = drops.Count;
+            NetworkMapSharer.Instance.spawnAServerDropToSave(itemId, stackAmount, position, null, tryNotToStack: true, xPType: xPType);
+            for (int i = before; i < drops.Count; i++)
+            {
+                if (drops[i] != null)
+                    collection.spawnedDropIds.Add(drops[i].netId);
+            }
+        }
+
+        // Worst-case new slots for one hive. A stackable output needs one slot per item type that is not
+        // already in the crate or claimed by another pending break; each unstackable output needs its own.
+        // The game rolls the bees later, so the count covers every bee the table could roll.
+        private static int CountLoggingHiveOutputSlots(Chest chest, WorldObject breakObject, HashSet<int> claimedStackItemIds, List<int> newStackItemIds)
+        {
+            int slots = 0;
+            InventoryItem drop = breakObject.dropsItemOnDestroyed;
+            if (drop != null && breakObject.dropPositions != null && breakObject.dropPositions.Length > 0)
+            {
+                if (!drop.checkIfStackable())
+                    slots += breakObject.dropPositions.Length;
+                else if (NeedsNewStackSlot(chest, Inventory.Instance.getInvItemId(drop), claimedStackItemIds, newStackItemIds))
+                {
+                    slots++;
+                    newStackItemIds.Add(Inventory.Instance.getInvItemId(drop));
+                }
+            }
+
+            int rolls = breakObject.bugPositions.Length;
+            bool anyUnstackable = false;
+            List<int> newBugItemIds = new List<int>();
+            InventoryItem[] table = breakObject.spawnBugOnDrop.itemsInLootTable;
+            for (int i = 0; table != null && i < table.Length; i++)
+            {
+                if (table[i] == null)
+                    continue;
+
+                int bugItemId = Inventory.Instance.getInvItemId(table[i]);
+                if (!table[i].checkIfStackable())
+                    anyUnstackable = true;
+                else if (!newBugItemIds.Contains(bugItemId) && NeedsNewStackSlot(chest, bugItemId, claimedStackItemIds, newStackItemIds))
+                    newBugItemIds.Add(bugItemId);
+            }
+
+            // More possible new types than rolls, or unstackable bees: each roll may need its own slot.
+            if (anyUnstackable || newBugItemIds.Count > rolls)
+                return slots + rolls;
+
+            newStackItemIds.AddRange(newBugItemIds);
+            return slots + newBugItemIds.Count;
+        }
+
+        private static bool NeedsNewStackSlot(Chest chest, int itemId, HashSet<int> claimedStackItemIds, List<int> newStackItemIds)
+        {
+            return !claimedStackItemIds.Contains(itemId) && !newStackItemIds.Contains(itemId) && CountItemInChest(chest, itemId) == 0;
+        }
+
+        private static int CountEmptySlots(Chest chest)
+        {
+            int empty = 0;
+            for (int slot = 0; slot < chest.itemIds.Length; slot++)
+            {
+                if (chest.itemIds[slot] == -1)
+                    empty++;
+            }
+
+            return empty;
+        }
+
+        private static float HorizontalDistance(Vector3 a, Vector3 b)
+        {
+            return new Vector2(a.x - b.x, a.z - b.z).magnitude;
+        }
+
+        // Starts taking output when the game spawns the break object of a hive this mod broke.
+        internal static bool BeginLoggingHiveBreakDrop(WorldObject worldObject)
+        {
+            if (pendingLoggingHiveBreaks.Count == 0 || worldObject == null || worldObject.spawnBugOnDrop == null)
+                return false;
+
+            Vector3 position = worldObject.transform.position;
+            for (int i = pendingLoggingHiveBreaks.Count - 1; i >= 0; i--)
+            {
+                LoggingHiveBreak hiveBreak = pendingLoggingHiveBreaks[i];
+                if (LoggingTime() > hiveBreak.expiresAt)
+                {
+                    pendingLoggingHiveBreaks.RemoveAt(i);
+                    continue;
+                }
+
+                if (HorizontalDistance(position, hiveBreak.position) > LOGGING_HIVE_MOVED_DISTANCE)
+                    continue;
+
+                // One break object per hive, so a later object at the same spot keeps its native drops.
+                pendingLoggingHiveBreaks.RemoveAt(i);
+                activeLoggingHiveBreak = hiveBreak;
+                return true;
+            }
+
+            return false;
+        }
+
+        // True when the crate takes an output the game just rolled. The caller then skips the native spawn.
+        internal static bool TryTakeLoggingHiveOutput(int itemId, int stackAmount, Vector3 position, int xPType, bool isBug)
+        {
+            LoggingHiveBreak hiveBreak = activeLoggingHiveBreak;
+            if (hiveBreak == null || itemId < 0 || stackAmount <= 0)
+                return false;
+
+            // The save holds this hive whole or brings it back on load. The rolled output waits for the
+            // save to end, so it never also lands in this save's chest snapshot.
+            if (IsWorldSaving())
+            {
+                RuntimeState.RunAfterSave(() => TakeLoggingHiveOutputAfterSave(hiveBreak, itemId, stackAmount, position, xPType, isBug));
+                return true;
+            }
+
+            // A crate that was removed or replaced since the break lets the game spawn this output normally.
+            Chest chest = hiveBreak.chest;
+            if (!Plugin.CanRunServerAutomation() || !IsLiveFarmerChest(chest))
+                return false;
+
+            // Store now, so the next room check sees it. The arc is only the visual.
+            System.Action grantCredit = isBug ? (System.Action)null : () =>
+                AutomationCreditHelper.TryGrantDroppedItemPickupCredit(itemId, stackAmount, xPType);
+            if (!HarvestHelper.TryDepositHarvestToChest(chest, null, itemId, stackAmount, grantCredit))
+            {
+                // The crate filled since the break. A bee stays a pickup, not a live bug, so the crate can still collect it.
+                HoldLoggingOutput(hiveBreak.collection, itemId, stackAmount, position, isBug ? -1 : xPType);
+                return true;
+            }
+
+            Vector3 chestWorld = GetVacuumTargetWorld(chest.xPos, chest.yPos);
+            float distance = Vector3.Distance(position, chestWorld);
+            float duration = Mathf.Clamp(0.15f + distance * 0.03f, 0.18f, 0.55f);
+            float arcHeight = Mathf.Clamp(0.3f + distance * 0.06f, 0.35f, 1.4f);
+            ConveyorAnimator.AnimateArcTransfer(itemId, stackAmount, position, chestWorld, duration, arcHeight, null);
+            TriggerVacuumVisual(chest.xPos, chest.yPos, duration + 0.2f);
+            MarkCrateActive(chest);
+            return true;
+        }
+
+        // The output rolled during a save. It goes to the crate now, or spawns as the game would have spawned it.
+        private static void TakeLoggingHiveOutputAfterSave(LoggingHiveBreak hiveBreak, int itemId, int stackAmount, Vector3 position, int xPType, bool isBug)
+        {
+            activeLoggingHiveBreak = hiveBreak;
+            bool taken;
+            try
+            {
+                taken = TryTakeLoggingHiveOutput(itemId, stackAmount, position, xPType, isBug);
+            }
+            finally
+            {
+                activeLoggingHiveBreak = null;
+            }
+
+            if (taken)
+                return;
+
+            if (isBug)
+                NetworkNavMesh.nav.spawnSpecificBug(itemId, position);
+            else
+                NetworkMapSharer.Instance.spawnAServerDrop(itemId, stackAmount, position, null, true, xPType);
         }
 
         private static bool TryProcessOneFarmAction(Chest chest)
@@ -1358,7 +2292,7 @@ namespace Autom8er
 
         private static int TryProcessBundledCropReplantStep(Chest chest)
         {
-            if (chest == null || !HasHoeTool(chest) || HasAxeTool(chest))
+            if (!Plugin.CanRunServerAutomation() || !IsLiveFarmerChest(chest) || !HasHoeTool(chest) || HasAxeTool(chest))
                 return 0;
 
             int processedTiles = 0;
@@ -1433,16 +2367,17 @@ namespace Autom8er
 
             int mapW = Mathf.Min(onTileMap.GetLength(0), tileTypeMap.GetLength(0));
             int mapH = Mathf.Min(onTileMap.GetLength(1), tileTypeMap.GetLength(1));
-            int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
-            int minY = Mathf.Max(0, chest.yPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxY = Mathf.Min(mapH - 1, chest.yPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minX = Mathf.Max(0, chest.xPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxX = Mathf.Min(mapW - 1, chest.xPos + Plugin.AUTO_FARMER_RANGE_TILES);
+            int minY = Mathf.Max(0, chest.yPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxY = Mathf.Min(mapH - 1, chest.yPos + Plugin.AUTO_FARMER_RANGE_TILES);
 
             for (int x = minX; x <= maxX; x++)
             {
                 for (int y = minY; y <= maxY; y++)
                 {
-                    if (!TryBuildBundledReplantPlan(chest, seedItemId, hasFertilizer, x, y, out ReplantTilePlan candidate))
+                    if (!TryBuildBundledReplantPlan(chest, seedItemId, hasFertilizer, x, y, out ReplantTilePlan candidate) ||
+                        !FarmEnclosureHelper.IsInFarmArea(chest, x, y))
                         continue;
 
                     if (bestPlan == null ||
@@ -1535,10 +2470,10 @@ namespace Autom8er
             int mapW = tileMap.GetLength(0);
             int mapH = tileMap.GetLength(1);
 
-            int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
-            int minY = Mathf.Max(0, chest.yPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxY = Mathf.Min(mapH - 1, chest.yPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minX = Mathf.Max(0, chest.xPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxX = Mathf.Min(mapW - 1, chest.xPos + Plugin.AUTO_FARMER_RANGE_TILES);
+            int minY = Mathf.Max(0, chest.yPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxY = Mathf.Min(mapH - 1, chest.yPos + Plugin.AUTO_FARMER_RANGE_TILES);
 
             List<HarvestTarget> targets = new List<HarvestTarget>();
 
@@ -1555,7 +2490,8 @@ namespace Autom8er
                         continue;
 
                     TileObjectGrowthStages growth = tileObj.tileObjectGrowthStages;
-                    if (!IsVacuumHarvestCandidate(x, y, tileObj, growth, statusMap[x, y]))
+                    if (!IsVacuumHarvestCandidate(x, y, tileObj, growth, statusMap[x, y]) ||
+                        !FarmEnclosureHelper.IsInFarmArea(chest, x, y))
                         continue;
 
                     long tileKey = PosKey(x, y);
@@ -1610,6 +2546,18 @@ namespace Autom8er
 
         public static void UpdateVisuals()
         {
+            if (!IsWorldSaving())
+            {
+                if (loggingClockStoppedAt >= 0f)
+                {
+                    loggingClockStoppedSeconds += Time.time - loggingClockStoppedAt;
+                    loggingClockStoppedAt = -1f;
+                }
+
+                // Gives restored logging outputs back to their crates on the first frame the loaded world is ready.
+                LoadLoggingRows();
+            }
+
             ProcessPendingFarmActions();
             ClearExpiredFarmReservations();
 
@@ -1664,10 +2612,25 @@ namespace Autom8er
             reservedFarmTiles.Clear();
             pendingFarmActions.Clear();
             pendingLoggingCollections.Clear();
+            pendingLoggingHiveBreaks.Clear();
+            loggingHiveSpawnOwner = null;
+            activeLoggingHiveBreak = null;
+            loggingClockStoppedAt = -1f;
+            loggingClockStoppedSeconds = 0f;
+            loggingBreakBatchStartedAt = float.NegativeInfinity;
+            loggingBreaksInBatch = 0;
+            loggingSaveRecords = null;
+            loggingLoadRecords = null;
+            restoredLoggingCollections.Clear();
+            restoredLoggingRespawns.Clear();
+            restoredDropShares.Clear();
+            loggingRestoreActive = false;
+            loggingSeedByTreeTile = null;
             activeLoggingSeedByCrate.Clear();
             loggingDirectionByCrate.Clear();
             loggingRowLengthByCrate.Clear();
             loggingCrateInstances.Clear();
+            loggingRowsLoaded = false;
             activeCrateUntil.Clear();
             farmerNetworkScaleCache.Clear();
         }
@@ -1722,13 +2685,13 @@ namespace Autom8er
             foreach (KeyValuePair<long, PendingLoggingCollection> entry in pendingLoggingCollections)
             {
                 PendingLoggingCollection candidate = entry.Value;
-                if (candidate == null || Time.time > candidate.expiresAt || candidate.existingDropIds.Contains(drop.netId))
+                if (candidate == null || LoggingTime() > candidate.expiresAt || candidate.existingDropIds.Contains(drop.netId))
                     continue;
 
                 int deltaX = Mathf.Abs(dropTile.x - candidate.sourceX);
                 int deltaY = Mathf.Abs(dropTile.y - candidate.sourceY);
                 bool wasCaptured = candidate.spawnedDropIds.Contains(drop.netId);
-                if (!wasCaptured && (deltaX > LOGGING_DROP_RADIUS_TILES || deltaY > LOGGING_DROP_RADIUS_TILES))
+                if (!wasCaptured && (candidate.waitingForRoom || deltaX > LOGGING_DROP_RADIUS_TILES || deltaY > LOGGING_DROP_RADIUS_TILES))
                     continue;
 
                 int distance = deltaX * deltaX + deltaY * deltaY;
@@ -1753,10 +2716,13 @@ namespace Autom8er
             if (pendingLoggingCollections.Count == 0)
                 return;
 
+            // Check each crate once, not once per pending trunk. A chest lookup walks every active chest.
+            pruneLiveCrates.Clear();
             List<long> expiredKeys = null;
             foreach (KeyValuePair<long, PendingLoggingCollection> entry in pendingLoggingCollections)
             {
-                if (entry.Value != null && Time.time <= entry.Value.expiresAt)
+                PendingLoggingCollection collection = entry.Value;
+                if (collection != null && LoggingTime() <= collection.expiresAt && IsLiveLoggingCrate(collection.chestX, collection.chestY))
                     continue;
 
                 if (expiredKeys == null)
@@ -1769,6 +2735,20 @@ namespace Autom8er
 
             for (int i = 0; i < expiredKeys.Count; i++)
                 pendingLoggingCollections.Remove(expiredKeys[i]);
+        }
+
+        private static bool IsLiveLoggingCrate(int chestX, int chestY)
+        {
+            long chestKey = PosKey(chestX, chestY);
+            bool live;
+            if (pruneLiveCrates.TryGetValue(chestKey, out live))
+                return live;
+
+            Chest chest;
+            live = loggingCrateInstances.TryGetValue(chestKey, out chest) && IsLiveFarmerChest(chest) &&
+                chest.xPos == chestX && chest.yPos == chestY;
+            pruneLiveCrates[chestKey] = live;
+            return live;
         }
 
         private static bool CanVacuumDeposit(Chest chest, HouseDetails inside, int itemId)
@@ -1893,6 +2873,10 @@ namespace Autom8er
                 return totalAmount;
             }
 
+            // A logging crate keeps its bug net so it can keep breaking hives.
+            if (IsBugNetItem(itemId) && HasAxeTool(chest))
+                return totalAmount;
+
             if (HasAxeTool(chest) && IsLoggingTreePlantingItem(itemId))
             {
                 int activeSeedItemId = GetActiveLoggingSeedItemId(chest);
@@ -1966,16 +2950,15 @@ namespace Autom8er
             if (HasPendingFarmActionsForChest(chest))
                 return true;
 
+            if (HasPendingLoggingCollection(chest))
+                return true;
+
             bool hasHoeTool = HasHoeTool(chest);
             bool hasShovelTool = HasShovelTool(chest);
             bool hasAxeTool = HasAxeTool(chest);
 
             if (hasAxeTool)
             {
-                PruneExpiredLoggingCollections();
-                if (pendingLoggingCollections.ContainsKey(PosKey(chest.xPos, chest.yPos)))
-                    return true;
-
                 LoggingActionType loggingAction;
                 int loggingX;
                 int loggingY;
@@ -2144,6 +3127,7 @@ namespace Autom8er
             if (chest == null)
                 return -1;
 
+            EnsureLoggingCrateInstance(chest);
             long chestKey = PosKey(chest.xPos, chest.yPos);
             int activeSeedItemId;
             bool hadActiveSeed = activeLoggingSeedByCrate.TryGetValue(chestKey, out activeSeedItemId);
@@ -2161,7 +3145,7 @@ namespace Autom8er
                 return activeSeedItemId;
             }
 
-            if (hadActiveSeed && CachedLoggingRowContainsSeedType(chest, activeSeedItemId))
+            if (hadActiveSeed)
                 return activeSeedItemId;
 
             Vector2Int inferredDirection;
@@ -2177,30 +3161,6 @@ namespace Autom8er
 
             activeLoggingSeedByCrate.Remove(chestKey);
             return -1;
-        }
-
-        private static bool CachedLoggingRowContainsSeedType(Chest chest, int seedItemId)
-        {
-            Vector2Int direction;
-            if (chest == null || !loggingDirectionByCrate.TryGetValue(PosKey(chest.xPos, chest.yPos), out direction))
-                return false;
-
-            int rowLength;
-            if (!loggingRowLengthByCrate.TryGetValue(PosKey(chest.xPos, chest.yPos), out rowLength))
-                rowLength = MAX_LOGGING_ROW_LENGTH;
-
-            for (int rowIndex = 0; rowIndex < rowLength; rowIndex++)
-            {
-                int tileX;
-                int tileY;
-                if (!TryGetLoggingTileInDirection(chest, direction, rowIndex, out tileX, out tileY))
-                    continue;
-
-                if (LoggingSeedProducesTreeTile(seedItemId, WorldManager.Instance.onTileMap[tileX, tileY]))
-                    return true;
-            }
-
-            return false;
         }
 
         private static bool IsLoggingStump(int tileObjectId, InventoryItem axe)
@@ -2280,16 +3240,17 @@ namespace Autom8er
 
             int mapW = Mathf.Min(onTileMap.GetLength(0), tileTypeMap.GetLength(0));
             int mapH = Mathf.Min(onTileMap.GetLength(1), tileTypeMap.GetLength(1));
-            int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
-            int minY = Mathf.Max(0, chest.yPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxY = Mathf.Min(mapH - 1, chest.yPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minX = Mathf.Max(0, chest.xPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxX = Mathf.Min(mapW - 1, chest.xPos + Plugin.AUTO_FARMER_RANGE_TILES);
+            int minY = Mathf.Max(0, chest.yPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxY = Mathf.Min(mapH - 1, chest.yPos + Plugin.AUTO_FARMER_RANGE_TILES);
 
             for (int x = minX; x <= maxX; x++)
             {
                 for (int y = minY; y <= maxY; y++)
                 {
-                    if (!validator(x, y))
+                    // Check the cheap tile rule first so a fully worked farm skips the enclosure scan.
+                    if (!validator(x, y) || !FarmEnclosureHelper.IsInFarmArea(chest, x, y))
                         continue;
 
                     int distance = Mathf.Abs(x - chest.xPos) + Mathf.Abs(y - chest.yPos);
@@ -2327,7 +3288,7 @@ namespace Autom8er
             FarmTileTarget foundTarget = null;
             bool found = VisitFarmTilesInPriorityOrder(chest, mapW, mapH, (x, y) =>
             {
-                if (!CanPlantTreeAt(itemId, x, y))
+                if (!CanPlantTreeAt(itemId, x, y) || !FarmEnclosureHelper.IsInFarmArea(chest, x, y))
                     return false;
 
                 foundTarget = new FarmTileTarget
@@ -2352,17 +3313,17 @@ namespace Autom8er
             if (chest == null || visitor == null || mapW <= 0 || mapH <= 0)
                 return false;
 
-            int minX = Mathf.Max(0, chest.xPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxX = Mathf.Min(mapW - 1, chest.xPos + VACUUM_HARVEST_RADIUS_TILES);
-            int minY = Mathf.Max(0, chest.yPos - VACUUM_HARVEST_RADIUS_TILES);
-            int maxY = Mathf.Min(mapH - 1, chest.yPos + VACUUM_HARVEST_RADIUS_TILES);
+            int minX = Mathf.Max(0, chest.xPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxX = Mathf.Min(mapW - 1, chest.xPos + Plugin.AUTO_FARMER_RANGE_TILES);
+            int minY = Mathf.Max(0, chest.yPos - Plugin.AUTO_FARMER_RANGE_TILES);
+            int maxY = Mathf.Min(mapH - 1, chest.yPos + Plugin.AUTO_FARMER_RANGE_TILES);
 
             int westEndX = Mathf.Min(chest.xPos, maxX);
             int eastStartX = Mathf.Max(chest.xPos + 1, minX);
             int northEndY = Mathf.Max(chest.yPos, minY);
             int southEndY = Mathf.Min(chest.yPos - 1, maxY);
 
-            // Always scan the active 21x21 plot from map-northwest first so the
+            // Always scan the configured plot from map-northwest first so the
             // crate keeps a predictable planting order regardless of how it was moved.
             return VisitFarmQuadrant(minX, westEndX, 1, maxY, northEndY, -1, visitor) ||
                    VisitFarmQuadrant(maxX, eastStartX, -1, maxY, northEndY, -1, visitor) ||
@@ -2394,7 +3355,7 @@ namespace Autom8er
 
         private static bool CanHoeTile(int xPos, int yPos)
         {
-            if (!IsOutdoorFarmTileInRange(xPos, yPos))
+            if (!IsOutdoorFarmTileInRange(xPos, yPos) || IsUnderwaterTile(xPos, yPos))
                 return false;
 
             int tileObjectId = WorldManager.Instance.onTileMap[xPos, yPos];
@@ -2491,6 +3452,12 @@ namespace Autom8er
                 return false;
 
             InventoryItem item = Inventory.Instance.allItems[itemId];
+            // Water plants need deep water. Land trees skip shallow water too, matching natural tree spawns.
+            if (item.placeable.tileObjectGrowthStages.mustBeInWater
+                ? !IsUnderwaterTile(xPos, yPos)
+                : WorldManager.Instance.waterMap != null && WorldManager.Instance.waterMap[xPos, yPos])
+                return false;
+
             int tileType = WorldManager.Instance.tileTypeMap[xPos, yPos];
             if (item.canBePlacedOntoTileType != null && item.canBePlacedOntoTileType.Length > 0)
             {
@@ -2520,6 +3487,14 @@ namespace Autom8er
 
             TileObjectSettings settings = WorldManager.Instance.allObjectSettings[tileObjectId];
             return settings != null && settings.isGrass;
+        }
+
+        // Dinkum's growth code treats water below ground height as underwater.
+        private static bool IsUnderwaterTile(int xPos, int yPos)
+        {
+            bool[,] waterMap = WorldManager.Instance.waterMap;
+            return waterMap != null && xPos < waterMap.GetLength(0) && yPos < waterMap.GetLength(1) &&
+                waterMap[xPos, yPos] && WorldManager.Instance.heightMap[xPos, yPos] < 0;
         }
 
         private static bool CanApplyInstaGrowTile(int xPos, int yPos)
@@ -2710,7 +3685,8 @@ namespace Autom8er
 
         private static int ProcessPendingFarmActions(bool ignoreSuspension = false)
         {
-            if (!ignoreSuspension && AreFarmerActionsSuspended())
+            // Planting and fertilizing take items from the crate. They stay queued until the save ends.
+            if (IsWorldSaving() || (!ignoreSuspension && AreFarmerActionsSuspended()))
                 return 0;
 
             if (pendingFarmActions.Count == 0)
@@ -2730,8 +3706,10 @@ namespace Autom8er
                 if (Time.time < action.executeAt)
                     continue;
 
+                // A fence or path placed since queueing can move this tile out of the farm.
                 Chest chest = ConveyorHelper.FindChestAt(action.chestX, action.chestY, null);
-                if (chest == null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, null))
+                if (chest == null || !ConveyorHelper.IsVacuumCrate(chest.xPos, chest.yPos, null) ||
+                    !FarmEnclosureHelper.IsInFarmArea(chest, action.tileX, action.tileY))
                 {
                     pendingFarmActions.RemoveAt(i);
                     continue;
@@ -2790,47 +3768,23 @@ namespace Autom8er
             return dayChangeVacuumHarvestRunning || Time.time < farmerActionsBlockedUntil;
         }
 
-        private static bool HasPendingFarmActionsForAny(List<Chest> chests, int startIndex, int endIndex)
+        private static bool HasPendingLoggingCollection(Chest chest, bool ignoreWaitingForRoom = false)
         {
-            if (chests == null || pendingFarmActions.Count == 0)
-                return false;
-
-            HashSet<long> waveChestKeys = new HashSet<long>();
-            for (int i = startIndex; i < endIndex && i < chests.Count; i++)
+            PruneExpiredLoggingCollections();
+            foreach (PendingLoggingCollection collection in pendingLoggingCollections.Values)
             {
-                Chest chest = chests[i];
-                if (chest == null)
+                if (collection.chestX != chest.xPos || collection.chestY != chest.yPos)
                     continue;
 
-                waveChestKeys.Add(PosKey(chest.xPos, chest.yPos));
-            }
-
-            if (waveChestKeys.Count == 0)
-                return false;
-
-            for (int i = 0; i < pendingFarmActions.Count; i++)
-            {
-                PendingFarmAction action = pendingFarmActions[i];
-                if (action == null)
-                    continue;
-
-                if (waveChestKeys.Contains(PosKey(action.chestX, action.chestY)))
+                if (!ignoreWaitingForRoom || !collection.waitingForRoom)
                     return true;
-            }
 
-            return false;
-        }
-
-        private static bool HasPendingLoggingCollectionForAny(List<Chest> chests, int startIndex, int endIndex)
-        {
-            if (chests == null || pendingLoggingCollections.Count == 0)
-                return false;
-
-            for (int i = startIndex; i < endIndex && i < chests.Count; i++)
-            {
-                Chest chest = chests[i];
-                if (chest != null && pendingLoggingCollections.ContainsKey(PosKey(chest.xPos, chest.yPos)))
-                    return true;
+                // A hive the crate just broke holds its collection until the outputs drop. That is not a wait for room.
+                for (int i = 0; i < pendingLoggingHiveBreaks.Count; i++)
+                {
+                    if (pendingLoggingHiveBreaks[i].collection == collection && LoggingTime() <= pendingLoggingHiveBreaks[i].expiresAt)
+                        return true;
+                }
             }
 
             return false;

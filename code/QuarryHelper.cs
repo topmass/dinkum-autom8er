@@ -286,7 +286,13 @@ namespace Autom8er
         {
             yield return new WaitForSeconds(breakDelay);
 
-            if (runGeneration != quarryRunGeneration)
+            // A break clears the node from the map and fills chests; a save in progress
+            // would keep one of them and lose or duplicate the other. An underground or
+            // off-island host would write the chests to nonSavedChests, so wait that out too.
+            while (Plugin.IsSaving || (NetworkServer.active && !Plugin.CanRunServerAutomation()))
+                yield return null;
+
+            if (runGeneration != quarryRunGeneration || !Plugin.CanRunServerAutomation())
                 yield break;
 
             BreakQuarryOutputs(runGeneration, quarryX, quarryY, nodesToHarvest);
@@ -385,7 +391,8 @@ namespace Autom8er
                 if (!ConveyorHelper.FallbackDepositToAnyChest(quarryX, quarryY, null, itemId, stackAmount, onDepositSuccess))
                 {
                     Vector3 fallbackDropPos = ConveyorAnimator.TileToWorld(quarryX, quarryY);
-                    NetworkMapSharer.Instance.spawnAServerDrop(itemId, stackAmount, fallbackDropPos, null, tryNotToStack: true, (int)CharLevelManager.SkillTypes.Mining);
+                    // ToSave: the node is already gone from the map, so an unsaved drop is lost on reload.
+                    NetworkMapSharer.Instance.spawnAServerDropToSave(itemId, stackAmount, fallbackDropPos, null, tryNotToStack: true, (int)CharLevelManager.SkillTypes.Mining);
                     Plugin.Log.LogWarning("Autom8er: Quarry drop fell back to a real ground drop because no valid chest space remained for item " + itemId + ".");
                 }
             };

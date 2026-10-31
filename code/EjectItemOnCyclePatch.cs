@@ -53,11 +53,30 @@ namespace Autom8er
                 stackAmount = Inventory.Instance.allItems[resultItemId].fuelMax;
             }
 
-            // Priority 1: Direct adjacent chest (not white/input-only)
             int sourceTileObjectId = inside != null
                 ? inside.houseMapOnTile[xPos, yPos]
                 : WorldManager.Instance.onTileMap[xPos, yPos];
 
+            // The save stored this changer as unfinished on its first frame, so a reload ejects it
+            // again. A chest deposit now would land in the later chest snapshot and duplicate it.
+            // The output is read now, before the game clears the changer, and delivered after the save.
+            if (Plugin.IsSaving && Plugin.CanRunServerAutomation())
+            {
+                Vector3 ejectPosition = __instance.ejectPos.position;
+                RuntimeState.RunAfterSave(() =>
+                {
+                    if (!DeliverOutput(xPos, yPos, inside, resultItemId, stackAmount, sourceTileObjectId))
+                        NetworkMapSharer.Instance.spawnAServerDropToSave(resultItemId, stackAmount, ejectPosition, inside);
+                });
+                return false;
+            }
+
+            return !DeliverOutput(xPos, yPos, inside, resultItemId, stackAmount, sourceTileObjectId);
+        }
+
+        private static bool DeliverOutput(int xPos, int yPos, HouseDetails inside, int resultItemId, int stackAmount, int sourceTileObjectId)
+        {
+            // Priority 1: Direct adjacent chest (not white/input-only)
             System.Action grantOutputCredit = () =>
             {
                 AutomationCreditHelper.TryGrantOutputCredit(sourceTileObjectId, resultItemId, stackAmount);
@@ -66,17 +85,17 @@ namespace Autom8er
             if (ConveyorHelper.TryDepositToAdjacentChestLegacy(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
             {
                 Plugin.LogVerbose("Autom8er: Machine output -> " + Inventory.Instance.allItems[resultItemId].itemName);
-                return false;
+                return true;
             }
 
             // Priority 2: Via Black Marble Path conveyor network
             if (ConveyorHelper.TryDepositViaConveyorPathLegacy(xPos, yPos, inside, resultItemId, stackAmount, grantOutputCredit))
             {
                 Plugin.LogVerbose("Autom8er: Machine output via conveyor -> " + Inventory.Instance.allItems[resultItemId].itemName);
-                return false;
+                return true;
             }
 
-            return true;
+            return false;
         }
     }
 }

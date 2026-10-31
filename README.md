@@ -18,8 +18,13 @@ Path tiles (Black Marble Path by default, configurable) act as conveyor belts co
 
 ### Special Crates
 - **White Crates** = input only: they feed machines but never receive outputs (white *chests* are normal storage)
+  - Exception: a black filter crate fills a touching white crate when no other storage touches that filter, so a filter can feed a machine.
 - **Black Crates** = filter crates: hold sample items and route matching items into a touching storage chest
 - **Green Crates** = AutoFarmer/vacuum crates: harvest nearby crops and fruit, till/fertilize/plant when holding tools, and forward everything into the connected network
+
+Set `AutoFarmerRangeTiles` from `1` to `10` to reduce the farm radius. The default `10` keeps the current `21 x 21` area.
+Water Tank sprinkler detection keeps its full 10-tile radius.
+In multiplayer, use the same value on each modded player so every range guide matches the host.
 
 ### Fish Ponds & Bug Terrariums
 Place a chest within 3 tiles of a fish pond or bug terrarium:

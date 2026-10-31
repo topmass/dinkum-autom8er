@@ -43,6 +43,7 @@ namespace Autom8er
         private ConfigEntry<bool> configInfiniteToolRebuy;
         private ConfigEntry<bool> configInfiniteFranklinOrdering;
         private ConfigEntry<bool> configFreeChestCratePainting;
+        private ConfigEntry<int> configAutoFarmerRangeTiles;
 
         // Default conveyor tile (Black Marble Path)
         public const int DEFAULT_CONVEYOR_TILE_ITEM_ID = 1747;
@@ -58,12 +59,15 @@ namespace Autom8er
         // TileObject IDs for colored crate-only feature blocks
         public const int GREEN_CRATE_TILE_ID = 412;
         public const int BLAST_FURNACE_TILE_ID = 581;
-        public const int AUTO_FARMER_RANGE_TILES = 10;
+        public const int MAX_AUTO_FARMER_RANGE_TILES = 10;
+        public static int AUTO_FARMER_RANGE_TILES = MAX_AUTO_FARMER_RANGE_TILES;
 
         // Item IDs
         public const int HAR_VAC_ITEM_ID = 1728;
         public const int TROPICAL_GRASS_TURF_ROLL_ITEM_ID = 1445;
         public const int WATER_TANK_ITEM_ID = 692;
+        public const int BEE_ITEM_ID = 227;
+        public const int QUEEN_BEE_ITEM_ID = 228;
 
         // Cached at runtime from item data
         public static int ConveyorTileType = -1;
@@ -149,6 +153,14 @@ namespace Autom8er
                 !RealWorldTimeLight.time.offIsland;
         }
 
+        // SaveAndLoad saves drops and machines on its first frame, writes the map over
+        // later frames, then saves chests. Automation that moves items in that window
+        // splits one item across two snapshots, so it waits until the save ends.
+        internal static bool IsSaving
+        {
+            get { return SaveLoad.saveOrLoad != null && SaveLoad.saveOrLoad.isSaving; }
+        }
+
         internal static bool IsDurabilityTransferItem(int itemId)
         {
             if (itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
@@ -157,6 +169,27 @@ namespace Autom8er
             InventoryItem item = Inventory.Instance.allItems[itemId];
             return item != null && item.hasFuel && !item.checkIfStackable();
         }
+        // Hive bees are the only insects Autom8er collects, so only they stack and go into chests by hand.
+        internal static bool IsStackedHiveBee(int itemId)
+        {
+            if (!StackableCritters || (itemId != BEE_ITEM_ID && itemId != QUEEN_BEE_ITEM_ID) ||
+                Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            return item != null && (bool)item.bug;
+        }
+
+        // Items this mod made stackable. Vanilla code that expects one per slot must not clear a stack of them.
+        internal static bool IsModStackedCritter(int itemId)
+        {
+            if (!StackableCritters || itemId < 0 || Inventory.Instance == null || itemId >= Inventory.Instance.allItems.Length)
+                return false;
+
+            InventoryItem item = Inventory.Instance.allItems[itemId];
+            return item != null && ((bool)item.underwaterCreature || IsStackedHiveBee(itemId));
+        }
+
         internal static bool KeepOneAppliesTo(Chest sourceChest, HouseDetails inside)
         {
             if (!KeepOneItem || sourceChest == null ||
@@ -298,9 +331,9 @@ namespace Autom8er
                 "Quality of Life",
                 "StackableCritters",
                 true,
-                "Makes all critters (underwater creatures) stackable in inventory and chests.\n" +
-                "Helps with automation and storage management.\n" +
-                "Disable to keep vanilla critter stacking behavior (1 per slot)."
+                "Makes all critters (underwater creatures) and hive bees (Bee, Queen Bee) stackable in inventory and chests.\n" +
+                "Bees can also go back into normal chests by hand. Other insects and fish keep vanilla behavior.\n" +
+                "Disable to keep vanilla critter and bee behavior (1 per slot)."
             );
 
             configInfiniteToolRebuy = Config.Bind(
@@ -324,6 +357,13 @@ namespace Autom8er
                 "Painting chests and crates changes their colour without consuming the paint can. Vehicle painting is unchanged."
             );
 
+            configAutoFarmerRangeTiles = Config.Bind(
+                "Auto Farmer",
+                "AutoFarmerRangeTiles",
+                MAX_AUTO_FARMER_RANGE_TILES,
+                "Green crate farm radius in tiles. Default 10 keeps the current 21 x 21 area. Range: 1 to 10."
+            );
+
             ConveyorTileItemId = configConveyorTileItemId.Value;
             KeepOneItem = configKeepOneItem.Value;
             KeepOneWhiteCratesOnly = configKeepOneWhiteCratesOnly.Value;
@@ -337,8 +377,9 @@ namespace Autom8er
             InfiniteToolRebuy = configInfiniteToolRebuy.Value;
             InfiniteFranklinOrdering = configInfiniteFranklinOrdering.Value;
             FreeChestCratePainting = configFreeChestCratePainting.Value;
+            AUTO_FARMER_RANGE_TILES = Mathf.Clamp(configAutoFarmerRangeTiles.Value, 1, MAX_AUTO_FARMER_RANGE_TILES);
 
-            Log.LogInfo("Autom8er v1.7.2 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", KeepOneWhiteCratesOnly=" + KeepOneWhiteCratesOnly + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", InfiniteToolRebuy=" + InfiniteToolRebuy + ", FranklinOrdering=" + InfiniteFranklinOrdering + ", FreeChestCratePainting=" + FreeChestCratePainting);
+            Log.LogInfo("Autom8er v1.7.2 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", KeepOneWhiteCratesOnly=" + KeepOneWhiteCratesOnly + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", InfiniteToolRebuy=" + InfiniteToolRebuy + ", FranklinOrdering=" + InfiniteFranklinOrdering + ", FreeChestCratePainting=" + FreeChestCratePainting + ", FarmRadius=" + AUTO_FARMER_RANGE_TILES);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
@@ -383,8 +424,17 @@ namespace Autom8er
             }
 
             ConveyorNetSync.ServerUpdate();
-            ConveyorAnimator.UpdateAnimations();
+
+            // The save patch flushes animations first; new scan transfers or arrivals
+            // before the chest snapshot would lose or duplicate items.
+            bool saving = IsSaving;
+            if (!saving)
+                ConveyorAnimator.UpdateAnimations();
             VacuumCrateHelper.UpdateVisuals();
+            if (saving)
+                return;
+
+            RuntimeState.RunQueuedAfterSave();
 
             scanTimer += Time.deltaTime;
             if (scanTimer >= ScanInterval)
@@ -455,7 +505,7 @@ namespace Autom8er
 
         private void CacheConveyorTileType()
         {
-            if (ConveyorTileItemId < Inventory.Instance.allItems.Length)
+            if (ConveyorTileItemId >= 0 && ConveyorTileItemId < Inventory.Instance.allItems.Length)
             {
                 InventoryItem pathItem = Inventory.Instance.allItems[ConveyorTileItemId];
                 if (pathItem != null && pathItem.placeableTileType > -1)
@@ -480,6 +530,7 @@ namespace Autom8er
         {
             crittersPatched = true;
             int critterCount = 0;
+            int beeCount = 0;
             for (int i = 0; i < Inventory.Instance.allItems.Length; i++)
             {
                 InventoryItem item = Inventory.Instance.allItems[i];
@@ -490,6 +541,12 @@ namespace Autom8er
                 {
                     item.isStackable = true;
                     critterCount++;
+                }
+
+                if (IsStackedHiveBee(i) && !item.isStackable)
+                {
+                    item.isStackable = true;
+                    beeCount++;
                 }
             }
 
@@ -506,6 +563,9 @@ namespace Autom8er
 
             if (critterCount > 0)
                 Log.LogInfo("Autom8er: Made " + critterCount + " critters stackable");
+
+            if (beeCount > 0)
+                Log.LogInfo("Autom8er: Made " + beeCount + " hive bees stackable");
 
             if (tropicalGrassPatched)
                 Log.LogInfo("Autom8er: Made Tropical Grass Turf Roll stackable");
@@ -550,7 +610,8 @@ namespace Autom8er
                     continue;
                 }
 
-                if (ConveyorHelper.IsPondOrTerrarium(chest.xPos, chest.yPos, inside))
+                if (ConveyorHelper.IsPondOrTerrarium(chest.xPos, chest.yPos, inside) ||
+                    ConveyorHelper.IsDisplayContainer(chest.xPos, chest.yPos, inside))
                     continue;
 
                 if (!ConveyorHelper.ChestHasItems(chest))
@@ -622,15 +683,23 @@ namespace Autom8er
         private void ProcessFarmerCrateBatch(List<Chest> chests, ref int cursor, float targetInterval, int maxPerPass)
         {
             int budget = CalculateRoundRobinBudget(chests, targetInterval, maxPerPass);
+            int deferredCursor = -1;
             for (int i = 0; i < budget; i++)
             {
+                int chestCursor = cursor;
                 Chest chest = GetNextRoundRobinChest(chests, ref cursor);
                 if (chest == null)
                     break;
 
                 VacuumCrateHelper.TryProcessFarmTile(chest, null);
+                // A crate the shared logging break budget turned away goes first next pass.
+                if (deferredCursor < 0 && VacuumCrateHelper.LoggingBreakDeferred)
+                    deferredCursor = chestCursor;
                 VacuumCrateHelper.TryFlushStoredItemsToNetwork(chest, null);
             }
+
+            if (deferredCursor >= 0)
+                cursor = deferredCursor;
         }
 
         private void ProcessVacuumCrateBatch(List<Chest> chests, ref int cursor, float targetInterval, int maxPerPass)
