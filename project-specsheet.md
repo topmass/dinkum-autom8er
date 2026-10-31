@@ -1,12 +1,17 @@
 # Autom8er Project Specsheet
 
 ## Overview
-**Version:** 1.7.2
+**Version:** 1.8.0
 **Plugin ID:** `topmass.autom8er`
 **DLL Name:** `topmass.autom8er.dll`
 **Target Framework:** net472
 **Game:** Dinkum (Steam)
 **Dependencies:** BepInEx 6.0.0-pre.1
+
+## 1.8.0 Release Status (2026-10-31)
+- **Prepared, not yet published:** `code/Autom8er.csproj`, `[BepInPlugin]`, and the startup log report `1.8.0`. The upload ZIP is `mod/topmass-autom8er-v1.8.0.zip` (DLL only, gitignored). v1.7.2 stays the live Nexus version until the user uploads 1.8.0.
+- **1.8.0 scope:** axe tree farming rows, Bug Net hive collection, Bee and Queen Bee stacking, fence/gate/path farm boundaries, `AutoFarmerRangeTiles`, black filter to touching white crate, and the fixes listed in the `bbcode-description.md` v1.8.0 changelog.
+- **Validation boundary:** the Conveyor, Vacuum, FarmEnclosure, and Save check scripts pass, and the Release build has 0 warnings and 0 errors. The in-game regression scenarios below still apply.
 
 ## Current 1.7.2 State (Audited 2026-07-09)
 - **GitHub source of truth:** `main` and `origin/main` both point to commit `a57ad445fcd6031cc2f74e571c9c362c2704cfc5` (`dev align BepInPlugin attribute version with csproj; mark animation sync released in spec`).

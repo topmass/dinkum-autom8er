@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Autom8er
 {
-    [BepInPlugin("topmass.autom8er", "Autom8er", "1.7.2")]
+    [BepInPlugin("topmass.autom8er", "Autom8er", "1.8.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -379,7 +379,7 @@ namespace Autom8er
             FreeChestCratePainting = configFreeChestCratePainting.Value;
             AUTO_FARMER_RANGE_TILES = Mathf.Clamp(configAutoFarmerRangeTiles.Value, 1, MAX_AUTO_FARMER_RANGE_TILES);
 
-            Log.LogInfo("Autom8er v1.7.2 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", KeepOneWhiteCratesOnly=" + KeepOneWhiteCratesOnly + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", InfiniteToolRebuy=" + InfiniteToolRebuy + ", FranklinOrdering=" + InfiniteFranklinOrdering + ", FreeChestCratePainting=" + FreeChestCratePainting + ", FarmRadius=" + AUTO_FARMER_RANGE_TILES);
+            Log.LogInfo("Autom8er v1.8.0 loaded! ConveyorTile=" + ConveyorTileItemId + ", Scan=" + ScanInterval + "s, KeepOne=" + KeepOneItem + ", KeepOneWhiteCratesOnly=" + KeepOneWhiteCratesOnly + ", SiloSpeed=" + SiloFillSpeed + ", FeedPonds=" + AutoFeedPonds + ", BreedHold=" + HoldOutputForBreeding + ", Anim=" + AnimationEnabled + ", AnimSpeed=" + AnimationSpeed + ", StackCritters=" + StackableCritters + ", InfiniteToolRebuy=" + InfiniteToolRebuy + ", FranklinOrdering=" + InfiniteFranklinOrdering + ", FreeChestCratePainting=" + FreeChestCratePainting + ", FarmRadius=" + AUTO_FARMER_RANGE_TILES);
 
             harmony = new Harmony("topmass.autom8er");
             harmony.PatchAll();
